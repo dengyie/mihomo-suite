@@ -49,7 +49,7 @@ LOCAL_NODES_FILE = ROOT / 'airports/local-nodes.yaml'
 CLIENT_EXPORT_FILE = ROOT / 'airports/mango-clash.yaml'
 CLIENT_EXPORT_META_FILE = ROOT / 'airports/mango-clash.meta.json'
 CLIENT_EXPORT_TOKEN_MODE = 0o640
-CLIENT_EXPORT_RENDER_REV = '2'
+CLIENT_EXPORT_RENDER_REV = '8'
 CLIENT_BUILTIN_OUTBOUNDS = frozenset({
     'DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'COMPATIBLE', 'GLOBAL',
 })
@@ -59,6 +59,7 @@ _LOG = logging.getLogger('mango-clash-export')
 CLIENT_DNS = {
     'enable': True,
     'ipv6': False,
+    'use-hosts': False,
     'enhanced-mode': 'fake-ip',
     'fake-ip-range': '198.18.0.1/16',
     'default-nameserver': ['223.5.5.5', '119.29.29.29', '1.1.1.1'],
@@ -76,12 +77,35 @@ CLIENT_DNS = {
         '*.localdomain',
         'localhost',
         '+.argotunnel.com',
-        '+.cloudflare.com',
-        '+.mangoqwq.com',
         '+.mangoq.ccwu.cc',
         '+.cc.cd',
     ],
 }
+
+# 2026-10-01: hosts 钉死已移除（纯 DoH）。
+# 回退: 见 clash 规则.md 十九(2026-10-01 已回退 hosts 钉死方案)。如需重演旧方案，恢复 CLIENT_HOSTS_IPV6 常量并在 CLIENT_DNS 还原 use-hosts/ipv6。
+
+
+# 2026-10-10: 国内主流音视频会议/协作直连白名单
+# 避免下方 STUN/TURN 标准端口规则误将国内合法会议软件（腾讯会议、飞书、钉钉、企业微信等）导向海外代理，保障国内会议超低延迟直连。
+CLIENT_DOMESTIC_MEDIA_RULES = [
+    'DOMAIN-SUFFIX,meeting.tencent.com,DIRECT',
+    'DOMAIN-SUFFIX,voip.qq.com,DIRECT',
+    'DOMAIN-SUFFIX,feishu.cn,DIRECT',
+    'DOMAIN-SUFFIX,dingtalk.com,DIRECT',
+    'DOMAIN-SUFFIX,work.weixin.qq.com,DIRECT',
+]
+
+# 2026-10-10: WebRTC STUN / UDP 分流规则（防真实公网 IP 泄漏，全端统一源端下发）
+# 优先于 DIRECT_RULES（特别是 cloudflare.com），将公网 STUN 域名与 RFC 5389/5766 标准端口（3478, 5349, 19302-19305）导向 PROXY，
+# 消除 WebRTC 在 TUN 模式下直接通过 UDP 反射真实家宽/公网 IP 的隐患。
+CLIENT_STUN_RULES = [
+    'DOMAIN,stun.cloudflare.com,PROXY',
+    'DOMAIN-KEYWORD,stun,PROXY',
+    'DST-PORT,3478,PROXY',
+    'DST-PORT,5349,PROXY',
+    'DST-PORT,19302-19305,PROXY',
+]
 
 CLIENT_DIRECT_RULES = [
     'DOMAIN-SUFFIX,argotunnel.com,DIRECT',
@@ -122,6 +146,28 @@ CLIENT_GOOGLE_RULES = [
     'DOMAIN-SUFFIX,gmail.com,' + GOOGLE_GROUP,
 ]
 CLIENT_FINAL_RULES = ['MATCH,PROXY']
+
+# 2026-10-01: MangoCF 橙标域名直连优先+故障回落(源端统一下发; 机制/教训全文见 clash 规则.md §十九)。
+# fallback 按序取第一个存活成员: DIRECT 探针 1.5s 内通=直连; v4 波浪判死→AUTO(自动最快存活节点)→PROXY(手选兜底), 恢复自动切回。
+# 探针必须与被保护域同 CF IP 段(GFW 波浪按段打击, cloudflare.com 的 104.16 段测不出 mangoqwq 104.21/172.67 段的波浪);
+# favicon 走 CF 边缘缓存(cf-cache-status HIT, max-age=14400), 与 hub 源站解耦。
+MANGO_CF_GROUP_NAME = 'MangoCF'
+CLIENT_MANGO_CF_GROUP = {
+    'name': MANGO_CF_GROUP_NAME,
+    'type': 'fallback',
+    'proxies': ['DIRECT', 'AUTO', 'PROXY'],
+    'url': 'https://vps.mangoqwq.com/favicon.ico',
+    'interval': 5,
+    'timeout': 1000,
+    'lazy': False,
+}
+# 2026-10-01(下午): 白名单改为例外清单+全域 suffix——download.mangoqwq.com 等新增子域不在 13 条名单内仍吃 v4 波浪;
+# 现仅 ssh-*/frp/doh/home-node/cpa.us(灰云)/check(本机 hosts 服务) 保持 DIRECT, 其余 *.mangoqwq.com 全部进 MangoCF。
+CLIENT_MANGO_CF_EXCEPT_RULES = [
+    'DOMAIN,%s.mangoqwq.com,DIRECT' % d
+    for d in ('ssh-tebi', 'ssh-pxed', 'ssh-home', 'ssh-laptop', 'frp', 'doh', 'doh-demo', 'home-node', 'cpa.us', 'check', 'check-api')
+]
+CLIENT_MANGO_CF_RULES = CLIENT_MANGO_CF_EXCEPT_RULES + ['DOMAIN-SUFFIX,mangoqwq.com,%s' % MANGO_CF_GROUP_NAME]
 _US_GOOGLE_NAME = re.compile(r'美国_BGP|北美洲】美国\d+原生')
 LOCAL_GROUP_VPS = 'vps-import'
 LOCAL_GROUP_GOOGLE = 'google'
@@ -2497,12 +2543,13 @@ class SubscriptionEngine:
             'allow-lan': client_allow_lan(),
             'mode': 'rule',
             'log-level': 'info',
-            'ipv6': False,
+            'ipv6': True,
             'unified-delay': True,
             'tun': dict(CLIENT_TUN),
             'dns': dict(CLIENT_DNS),
             'proxies': proxies,
             'proxy-groups': [
+                dict(CLIENT_MANGO_CF_GROUP),
                 {
                     'name': 'PROXY',
                     'type': 'select',
@@ -2522,7 +2569,14 @@ class SubscriptionEngine:
                     'proxies': google_members,
                 },
             ],
-            'rules': list(CLIENT_DIRECT_RULES) + list(CLIENT_GOOGLE_RULES) + list(CLIENT_FINAL_RULES),
+            'rules': (
+                list(CLIENT_MANGO_CF_RULES)
+                + list(CLIENT_DOMESTIC_MEDIA_RULES)
+                + list(CLIENT_STUN_RULES)
+                + list(CLIENT_DIRECT_RULES)
+                + list(CLIENT_GOOGLE_RULES)
+                + list(CLIENT_FINAL_RULES)
+            ),
         }
         return fast_yaml_dump(doc)
 

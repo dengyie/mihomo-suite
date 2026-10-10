@@ -698,6 +698,9 @@ def test_render_client_clash_config_includes_dns_and_local_nodes(temp_clash_root
     assert "https://doh.pub/dns-query" in doc["dns"]["proxy-server-nameserver"]
     assert "+.argotunnel.com" in doc["dns"]["fake-ip-filter"]
     assert "DOMAIN-SUFFIX,mangoqwq.com,DIRECT" in doc["rules"]
+    assert "DOMAIN-SUFFIX,meeting.tencent.com,DIRECT" in doc["rules"]
+    assert "DOMAIN,stun.cloudflare.com,PROXY" in doc["rules"]
+    assert "DST-PORT,3478,PROXY" in doc["rules"]
     assert "DOMAIN,accounts.google.com,🎯Google" in doc["rules"]
     assert "DOMAIN-SUFFIX,google.com,🎯Google" in doc["rules"]
     assert doc["rules"][-1] == "MATCH,PROXY"
@@ -714,6 +717,53 @@ def test_render_client_clash_config_includes_dns_and_local_nodes(temp_clash_root
     assert "[Airport] Airport-Dead" not in groups["PROXY"]["proxies"]
     assert "HK-Reality" in groups["PROXY"]["proxies"]
     assert sentinel.read_text(encoding="utf-8") == before
+
+
+def test_client_clash_export_webrtc_stun_and_media_rules_ordering(temp_clash_root):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
+    (temp_clash_root / "airports" / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": "Node-A", "type": "ss", "server": "1.2.3.4", "port": 8388, "cipher": "aes-128-gcm", "password": "x"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    yaml_text = engine.render_client_clash_config(fetch_remote=False)
+    errors = sm.validate_client_clash_yaml(yaml_text)
+    assert errors == []
+
+    doc = yaml.safe_load(yaml_text)
+    rules = doc["rules"]
+
+    # 1. Domestic media rules must be DIRECT
+    media_rule = "DOMAIN-SUFFIX,meeting.tencent.com,DIRECT"
+    assert media_rule in rules
+
+    # 2. STUN rules must route to PROXY
+    stun_domain_rule = "DOMAIN,stun.cloudflare.com,PROXY"
+    stun_port_rule = "DST-PORT,3478,PROXY"
+    assert stun_domain_rule in rules
+    assert stun_port_rule in rules
+
+    # 3. Cloudflare wildcard DIRECT rule
+    cf_rule = "DOMAIN-SUFFIX,cloudflare.com,DIRECT"
+    assert cf_rule in rules
+
+    # 4. Strict priority ordering:
+    # Domestic media < STUN rules < Cloudflare direct
+    idx_media = rules.index(media_rule)
+    idx_stun_domain = rules.index(stun_domain_rule)
+    idx_stun_port = rules.index(stun_port_rule)
+    idx_cf = rules.index(cf_rule)
+
+    assert idx_media < idx_stun_domain
+    assert idx_stun_domain < idx_cf
+    assert idx_stun_port < idx_cf
+    assert sm.CLIENT_EXPORT_RENDER_REV == "8"
 
 
 def test_client_google_group_uses_us_nodes_not_azure(temp_clash_root, monkeypatch):
