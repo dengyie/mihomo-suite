@@ -83,7 +83,7 @@ def strip_self_tag(name: str) -> str:
 
 
 def denylist_keys(name: str) -> tuple[str, ...]:
-    """All historical spellings a denylist entry for ``name`` may use.
+    """All historical spellings a denylist entry for a self-built node may use.
 
     Covers the bare name, the flagged tagged form and the pre-flag tagged form,
     so an entry written before a rename keeps matching after it.
@@ -93,7 +93,15 @@ def denylist_keys(name: str) -> tuple[str, ...]:
 
 
 def is_disabled(name: str, disabled: set[str]) -> bool:
-    """True when the node is denylisted under any of its known spellings."""
+    """True when the node is denylisted.
+
+    Self-built nodes match under any known spelling (rename-proof); every other
+    name -- airport, subscription-injected -- matches exactly.
+    """
+    if not isinstance(name, str):
+        return False
+    if not name.startswith(SELF_TAG):
+        return name in disabled
     return any(key in disabled for key in denylist_keys(name))
 
 

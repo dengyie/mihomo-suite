@@ -79,14 +79,17 @@ def strip_self_tag(name: str) -> str:
 
 
 def is_denylisted(name: str, denylist) -> bool:
-    """True when ``name`` appears in the denylist under any historical spelling.
+    """True when ``name`` appears in the denylist.
 
-    Covers the bare name, the flagged ``[自建] `` form and the pre-flag tagged
-    form, so an entry written before a rename keeps matching after it, and all
-    consumers of disabled-nodes.txt agree on one matching rule.
+    Self-built nodes match under any historical spelling (bare name, flagged
+    ``[自建] `` form, pre-flag tagged form) so an entry survives a rename; every
+    other name matches exactly. All consumers of disabled-nodes.txt share this
+    rule so the file can never mean different things in different code paths.
     """
     if not isinstance(name, str):
         return False
+    if not name.startswith(SELF_TAG):
+        return name in denylist
     bare = strip_self_tag(name)
     return any(p in denylist for p in (name, SELF_TAG + bare, bare))
 _LOG = logging.getLogger('mango-clash-export')
