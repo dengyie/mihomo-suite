@@ -46,10 +46,14 @@ node scripts/3xui-health/guard-test.js
 
 118 节点 → 存活 41（34.7%），死亡 74。
 
-- **「机场BGP」整批 36 个全灭**：3x-ui 聚合时用了已失效的入口域名
-  `api.strawberrymemo.com`；草莓官方订阅走 `lb.download.strawberrymemo.com`。
-  BGP 系整批同理——共 29 个草莓系节点，已拆成独立数组
-  `DEAD_STRAWBERRY_BGP`，**面板入口修好后带同名字新增服务器即可整批复活**。
+- **「机场BGP」整批 36 个全灭**：草莓机场整条域名链已撤服。`api.strawberrymemo.com`
+  只是 `lb.download.strawberrymemo.com` 的 CNAME，而后者**没有 A/AAAA 记录**
+  （阿里云 GTM `gtm.alidns.com` 返回 NOERROR 空应答；Google DoH 与 AliDNS 双源一致）。
+  即不是聚合端入口写错，**面板侧无可修项**；本机池文件
+  `airports/local-nodes.yaml` 的 29 条 BGP 参数（端口/SNI/密码哈希）与草莓官方
+  订阅逐条一致，仅域名不同且两个域名均不可解析。
+  共 29 个草莓系节点拆成独立数组 `DEAD_STRAWBERRY_BGP`：**机场若复活回池，
+  删该数组即整批恢复**。
 - `[share]` 组 24 个里 19 个死亡（55–66%），该机场下架严重。
 - `[tomorin]` 组 24 个里 18 个存活，最稳。
 - 国内直连 Reality 系列（Huawei/Tencent/Tebi/Azure）全部存活，40–150ms。
