@@ -36,13 +36,14 @@ BLOCKED_NAMES = {'续费备用节点', 'PXED-BRIDGE'}
 # Self-built nodes that only exist in the live configs (legacy 3x-ui leftovers,
 # no longer produced by any active subscription). Tag them in place so they
 # stop looking like airport nodes; they are never added or removed here.
-LEGACY_SELF_BUILT = (
-    'GVPS-AnyTLS-googlevps',
-    'GVPS-TUIC-googlevps',
-    'GVPS-Aliyun-BJ-SOCKS',
-    'Azure-HK-TUIC',
-    '🏠home-win-mesh',
-)
+# Map: bare name -> the exact tagged name the live config should carry.
+LEGACY_SELF_BUILT = {
+    'GVPS-AnyTLS-googlevps': '[自建] 🇺🇸GVPS-AnyTLS-googlevps',
+    'GVPS-TUIC-googlevps': '[自建] 🇺🇸GVPS-TUIC-googlevps',
+    'GVPS-Aliyun-BJ-SOCKS': '[自建] 🇨🇳GVPS-Aliyun-BJ-SOCKS',
+    'Azure-HK-TUIC': '[自建] 🇭🇰Azure-HK-TUIC',
+    '🏠home-win-mesh': '[自建] 🏠home-win-mesh',
+}
 
 
 def is_third_party_or_blocked(name: str) -> bool:
@@ -62,9 +63,17 @@ def is_auto_excluded(name: str) -> bool:
     return any(k in low for k in ('azure', 'reverse', '17897', 'home-win', 'pxed-bridge'))
 
 
+# A leading region flag is part of the display name ("[自建] 🇭🇰TUIC-Azure").
+# Strip it for matching so denylists / whitelists / policy written against the
+# bare name keep working after a flag was added.
+FLAG_RE = re.compile('^[\U0001F1E6-\U0001F1FF]{2}')
+
+
 def strip_self_tag(name: str) -> str:
-    """Return the bare node name without the ``[自建] `` prefix."""
-    return name[len(SELF_TAG):] if name.startswith(SELF_TAG) else name
+    """Return the bare node name without the ``[自建] `` prefix or region flag."""
+    if name.startswith(SELF_TAG):
+        name = name[len(SELF_TAG):]
+    return FLAG_RE.sub('', name)
 
 
 def is_disabled(name: str, disabled: set[str]) -> bool:
@@ -90,8 +99,11 @@ def self_tag_map(proxies) -> dict[str, str]:
         name = proxy.get('name')
         if isinstance(name, str) and name.startswith(SELF_TAG) and len(name) > len(SELF_TAG):
             mapping[strip_self_tag(name)] = name
-    for name in LEGACY_SELF_BUILT:
-        mapping.setdefault(name, SELF_TAG + name)
+    for bare, tagged in LEGACY_SELF_BUILT.items():
+        mapping.setdefault(bare, tagged)
+        # configs migrated by an earlier run may already carry the old, unflagged
+        # ``[自建] bare`` form; route it to the canonical (flagged) name too.
+        mapping.setdefault(SELF_TAG + bare, tagged)
     return mapping
 
 
@@ -143,12 +155,20 @@ def _rename_targets(groups, listeners, rules, mapping: dict[str, str]) -> int:
     return edits
 
 
-def rename_self_built(data: dict, imported: list[dict]) -> tuple[int, int]:
-    """Mirror the pool's ``[自建]`` prefix onto a live config, idempotently.
+def upstream_key(proxy: dict) -> tuple:
+    """Identity of the endpoint a proxy dials (server/port/type)."""
+    return (str(proxy.get('server')), proxy.get('port'), proxy.get('type'))
 
-    * proxies: bare ``VLESS-Azure-Reality`` -> ``[自建] VLESS-Azure-Reality``;
-      when a tagged twin already exists and dials the same upstream, the bare
-      copy is retired instead of renamed (no duplicate names).
+
+def rename_self_built(data: dict, imported: list[dict]) -> tuple[int, int]:
+    """Mirror the pool's ``[自建]`` names onto a live config, idempotently.
+
+    * proxies: bare ``VLESS-Azure-Reality`` -> the pool's tagged name; when a
+      twin already exists and dials the same upstream, the duplicate is retired
+      instead of renamed (no duplicate names).
+    * a stale tagged name (e.g. ``[自建] TUIC-Azure`` after the pool renamed the
+      node to ``[自建] 🇭🇰TUIC-Azure``) adopts the pool's canonical name for its
+      upstream, so a rename in the pool never leaves an old copy behind.
     * every structural reference follows: dialer-proxy, group members,
       listener ``proxy``, rule destinations.
     Returns ``(nodes_renamed_or_retired, reference_edits)``.
@@ -156,6 +176,11 @@ def rename_self_built(data: dict, imported: list[dict]) -> tuple[int, int]:
     mapping = self_tag_map(imported)
     if not mapping:
         return 0, 0
+    canonical: dict[tuple, str] = {}
+    for proxy in imported or []:
+        if (isinstance(proxy, dict) and isinstance(proxy.get('name'), str)
+                and proxy['name'].startswith(SELF_TAG)):
+            canonical.setdefault(upstream_key(proxy), proxy['name'])
     proxies = data.get('proxies') or []
     tagged = {
         p['name']: p
@@ -165,6 +190,8 @@ def rename_self_built(data: dict, imported: list[dict]) -> tuple[int, int]:
         and p['name'].startswith(SELF_TAG)
     }
     nodes = 0
+    rename_map: dict[str, str] = {}
+    adopted: dict[str, dict] = {}
     kept = []
     for proxy in proxies:
         if not isinstance(proxy, dict) or not isinstance(proxy.get('name'), str):
@@ -172,22 +199,37 @@ def rename_self_built(data: dict, imported: list[dict]) -> tuple[int, int]:
             continue
         name = proxy['name']
         new_name = mapping.get(name)
+        if new_name is not None and new_name == name:
+            # already-canonical legacy form (e.g. 🏠home-win-mesh tag maps to
+            # itself): nothing to do, and never treat it as its own twin.
+            new_name = None
+        if new_name is None and name.startswith(SELF_TAG) and len(name) > len(SELF_TAG):
+            candidate = canonical.get(upstream_key(proxy))
+            if candidate is not None and candidate != name:
+                new_name = candidate
         if new_name is not None:
-            twin = tagged.get(new_name)
+            twin = adopted.get(new_name) or tagged.get(new_name)
             if twin is None:
                 proxy['name'] = new_name
+                rename_map[name] = new_name
+                adopted[new_name] = proxy
                 nodes += 1
             elif same_upstream(proxy, twin):
+                rename_map[name] = new_name
                 nodes += 1
-                continue  # bare duplicate retired; tagged twin already present
+                continue  # duplicate of an already-canonical node; retire it
             # else: same name but a different upstream -> leave it alone.
-        dialer = proxy.get('dialer-proxy')
-        if isinstance(dialer, str) and dialer in mapping:
-            proxy['dialer-proxy'] = mapping[dialer]
         kept.append(proxy)
     data['proxies'] = kept
+    combined = dict(mapping)
+    combined.update(rename_map)
+    for proxy in kept:
+        if isinstance(proxy, dict):
+            dialer = proxy.get('dialer-proxy')
+            if isinstance(dialer, str) and dialer in combined:
+                proxy['dialer-proxy'] = combined[dialer]
     refs = _rename_targets(
-        data.get('proxy-groups'), data.get('listeners'), data.get('rules'), mapping
+        data.get('proxy-groups'), data.get('listeners'), data.get('rules'), combined
     )
     return nodes, refs
 

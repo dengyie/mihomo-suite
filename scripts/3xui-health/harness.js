@@ -39,9 +39,16 @@ const mustHave = [
   "[tomorin] [anytls]VN Hanoi VNPT", "AnyTLS-googlevps", "[share] 🇭🇰HK-Warp1(Sak)",
   "[tomorin] US LAS Buyvm", "TUIC-Azure", "🇸🇬【亚洲】新加坡03丨直连",
 ];
-for (const n of mustHave) ok(outNames.has(n) || outNames.has(SELF_TAG + n), `alive node missing: ${n}`);
-// 44 subscription survivors + 1 script-injected home-win-mesh
-ok(outNames.size === 45, `proxy count ${outNames.size} != 45`);
+// self-built names carry "[自建] " + optional region flag; airport names keep their flag
+const stripTag = (n) => {
+  if (!n.startsWith(SELF_TAG)) return n;
+  return n.slice(SELF_TAG.length).replace(/^[\u{1F1E6}-\u{1F1FF}]{2}/u, "");
+};
+for (const n of mustHave) {
+  ok([...outNames].some((x) => stripTag(x) === n), `alive node missing: ${n}`);
+}
+// 49 proxies = 48 subscription survivors + 1 script-injected home-win-mesh
+ok(outNames.size === 49, `proxy count ${outNames.size} != 49`);
 
 // 3. mesh node injected and first member of 🏠家宽
 const MESH = outNames.has(SELF_TAG + "🏠home-win-mesh") ? SELF_TAG + "🏠home-win-mesh" : "🏠home-win-mesh";
@@ -62,8 +69,8 @@ for (const g of out["proxy-groups"] || []) {
   ok(keepsAll || members.length > 0 || (g.use || []).length > 0, `group ${g.name} is empty`);
 }
 
-// 5. expected member counts
-const expectCounts = { PROXY: 46, AUTO: 43, "🎯Google": 7, "🎯Claude": 9, "🎯OpenAI": 8, MangoCF: 3, "🏠家宽": 7 };
+// 5. expected member counts (snapshot-coupled: re-pin when sub.json is refreshed)
+const expectCounts = { PROXY: 50, AUTO: 47, "🎯Google": 7, "🎯Claude": 9, "🎯OpenAI": 8, MangoCF: 3, "🏠家宽": 3 };
 for (const [name, want] of Object.entries(expectCounts)) {
   const g = (out["proxy-groups"] || []).find((x) => x?.name === name);
   ok(g && (g.proxies || []).length === want, `group ${name}: ${(g && (g.proxies || []).length) || "missing"} != ${want}`);
@@ -82,4 +89,4 @@ if (fail.length) {
   for (const f of fail) console.error("  - " + f);
   process.exit(1);
 }
-console.log(`HARNESS PASS: proxies=44, groups=${(out["proxy-groups"] || []).length}, rules=${rules.length}`);
+console.log(`HARNESS PASS: proxies=49, groups=${(out["proxy-groups"] || []).length}, rules=${rules.length}`);

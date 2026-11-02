@@ -763,7 +763,7 @@ def test_client_clash_export_webrtc_stun_and_media_rules_ordering(temp_clash_roo
     assert idx_media < idx_stun_domain
     assert idx_stun_domain < idx_cf
     assert idx_stun_port < idx_cf
-    assert sm.CLIENT_EXPORT_RENDER_REV == "12"
+    assert sm.CLIENT_EXPORT_RENDER_REV == "13"
 
 
 def test_client_home_broadband_group_routes_hybgzs(temp_clash_root):

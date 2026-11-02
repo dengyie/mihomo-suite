@@ -5,7 +5,7 @@ import json, socket, urllib.parse, http.client, concurrent.futures
 SOCK = "/var/run/clash-verge-service/users/501/verge-mihomo.sock"
 CANDIDATES = [
     "AnyTLS-googlevps",
-    "[自建] AnyTLS-googlevps",
+    "[自建] 🇺🇸AnyTLS-googlevps",
     "[tomorin] [anytls]VN Hanoi VNPT",
     "[tomorin] [anytls]VN Hanoi VNPT IPv6",
     "[tomorin] US LAS Buyvm",

@@ -53,16 +53,23 @@ CLIENT_EXPORT_TOKEN_MODE = 0o640
 # 2026-10-16: REV '10' - 生产级上线 🎯Claude 专有防封分流策略组与独立 US 回落逻辑
 # 2026-10-23: REV '11' - 源端统一下发 🏠家宽 分组与 hybgzs.com 家宽路由
 # 2026-11-03: REV '12' - 自建节点统一 [自建] 前缀, 客户端导出跟随改名
-CLIENT_EXPORT_RENDER_REV = '12'
+# 2026-11-03: REV '13' - 自建节点加地区国旗 (如 [自建] 🇭🇰TUIC-Azure)
+CLIENT_EXPORT_RENDER_REV = '13'
 CLIENT_BUILTIN_OUTBOUNDS = frozenset({
     'DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'COMPATIBLE', 'GLOBAL',
 })
 SELF_TAG = '[自建] '
+# A leading region flag is part of the display name ("[自建] 🇭🇰TUIC-Azure");
+# strip it for matching so name-based policy keeps working after a flag was
+# added to a node (2026-11-03).
+SELF_FLAG_RE = re.compile('^[\U0001F1E6-\U0001F1FF]{2}')
 
 
 def strip_self_tag(name: str) -> str:
-    """Remove the ``[自建] `` prefix so name-based policy keeps matching."""
-    return name[len(SELF_TAG):] if name.startswith(SELF_TAG) else name
+    """Remove the ``[自建] `` prefix and region flag so name-based policy keeps matching."""
+    if name.startswith(SELF_TAG):
+        name = name[len(SELF_TAG):]
+    return SELF_FLAG_RE.sub('', name)
 _LOG = logging.getLogger('mango-clash-export')
 
 # Client Clash export: DNS bootstrap that avoids TUN + fake-ip deadlock.
