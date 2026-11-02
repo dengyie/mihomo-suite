@@ -191,11 +191,17 @@ def build_data(target: Path, imported: list[dict], disabled: set[str]) -> tuple[
                 cleaned = [name for name in cleaned if not any(k in name.lower() for k in ('reverse', '17897', 'pxed-bridge'))]
             elif g_name == 'cpa-clean-egress':
                 cleaned = [name for name in cleaned if not any(k in name.lower() for k in ('reverse', '17897'))]
-                if '🏠home-win-CF' in valid_references and '🏠home-win-CF' not in cleaned:
-                    cleaned.insert(0, '🏠home-win-CF')
-                elif '🏠home-win-CF' in cleaned and cleaned[0] != '🏠home-win-CF':
-                    cleaned.remove('🏠home-win-CF')
-                    cleaned.insert(0, '🏠home-win-CF')
+                # 2026-11-02: 家宽优先走 mesh。CF 隧道链路掉线时 fallback 会跳过它
+                # 落到国内 Reality 节点(cpa-clean-egress 语义是住宅家宽出口);
+                # mesh 与 CF 同一家宽出口但经 easytier 直连更稳, CF 降为次选。
+                # 仅对 fallback 形态生效, 不动 config.mac-merged 的 select 形态。
+                prefs = ('🏠home-win-CF', '🏠home-win-mesh') if item.get('type') == 'fallback' else ('🏠home-win-CF',)
+                for pref in prefs:
+                    if pref in valid_references and pref not in cleaned:
+                        cleaned.insert(0, pref)
+                    elif pref in cleaned and cleaned[0] != pref:
+                        cleaned.remove(pref)
+                        cleaned.insert(0, pref)
             if not cleaned:
                 cleaned = ['PROXY'] if 'PROXY' in valid_references and g_name != 'PROXY' else ['DIRECT']
             item['proxies'] = cleaned

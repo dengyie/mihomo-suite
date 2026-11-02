@@ -41,8 +41,8 @@ jobs:
       - name: Syntax & Lint check Python files
         run: |
           echo "Checking Python syntax and basic errors..."
-          pyflakes clash/rules-reconciler.py clash/apply-local-import.py clash/subscription-manager.py zashboard/gateway.py tests/*.py
-          python3 -m py_compile clash/rules-reconciler.py clash/apply-local-import.py clash/subscription-manager.py zashboard/gateway.py tests/*.py
+          pyflakes clash/rules-reconciler.py clash/apply-local-import.py clash/subscription-manager.py clash/hutao-bridge-guard.py zashboard/gateway.py tests/*.py
+          python3 -m py_compile clash/rules-reconciler.py clash/apply-local-import.py clash/subscription-manager.py clash/hutao-bridge-guard.py zashboard/gateway.py tests/*.py
           echo "All Python scripts passed syntax validation."
 
       - name: Run Python unit tests
