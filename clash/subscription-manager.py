@@ -49,10 +49,20 @@ LOCAL_NODES_FILE = ROOT / 'airports/local-nodes.yaml'
 CLIENT_EXPORT_FILE = ROOT / 'airports/mango-clash.yaml'
 CLIENT_EXPORT_META_FILE = ROOT / 'airports/mango-clash.meta.json'
 CLIENT_EXPORT_TOKEN_MODE = 0o640
-CLIENT_EXPORT_RENDER_REV = '8'
+# 2026-10-15: REV '9' - 生产级上线 🎯OpenAI 专有策略组与独立 US 回落逻辑
+# 2026-10-16: REV '10' - 生产级上线 🎯Claude 专有防封分流策略组与独立 US 回落逻辑
+# 2026-10-23: REV '11' - 源端统一下发 🏠家宽 分组与 hybgzs.com 家宽路由
+# 2026-11-03: REV '12' - 自建节点统一 [自建] 前缀, 客户端导出跟随改名
+CLIENT_EXPORT_RENDER_REV = '12'
 CLIENT_BUILTIN_OUTBOUNDS = frozenset({
     'DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'COMPATIBLE', 'GLOBAL',
 })
+SELF_TAG = '[自建] '
+
+
+def strip_self_tag(name: str) -> str:
+    """Remove the ``[自建] `` prefix so name-based policy keeps matching."""
+    return name[len(SELF_TAG):] if name.startswith(SELF_TAG) else name
 _LOG = logging.getLogger('mango-clash-export')
 
 # Client Clash export: DNS bootstrap that avoids TUN + fake-ip deadlock.
@@ -120,7 +130,61 @@ CLIENT_DIRECT_RULES = [
     'GEOIP,LAN,DIRECT,no-resolve',
 ]
 
+# 2026-10-23: 国内家宽出口分组。默认成员 🏠home-win-CF(上海移动家宽 CF Tunnel), DIRECT 兜底。
+# 新增要走家宽的站点只需往 CLIENT_HOME_BROADBAND_SUFFIXES 追加后缀, 渲染时自动展开成规则。
+HOME_GROUP = '🏠家宽'
+CLIENT_HOME_GROUP_FALLBACK = ['🏠home-win-CF', 'DIRECT']
+CLIENT_HOME_BROADBAND_SUFFIXES = ['hybgzs.com']
+CLIENT_HOME_BROADBAND_RULES = [
+    'DOMAIN-SUFFIX,%s,%s' % (domain, HOME_GROUP)
+    for domain in CLIENT_HOME_BROADBAND_SUFFIXES
+]
+
 GOOGLE_GROUP = '🎯Google'
+CLAUDE_GROUP = '🎯Claude'
+CLIENT_CLAUDE_RULES = [
+    # 核心业务
+    'DOMAIN-SUFFIX,claude.ai,' + CLAUDE_GROUP,
+    'DOMAIN-SUFFIX,claude.com,' + CLAUDE_GROUP,
+    'DOMAIN-SUFFIX,clau.de,' + CLAUDE_GROUP,
+    'DOMAIN-SUFFIX,anthropic.com,' + CLAUDE_GROUP,
+    'DOMAIN-SUFFIX,claudeusercontent.com,' + CLAUDE_GROUP,
+    'DOMAIN-SUFFIX,claudemcpclient.com,' + CLAUDE_GROUP,
+    # 静态与 CDN
+    'DOMAIN,servd-anthropic-website.b-cdn.net,' + CLAUDE_GROUP,
+    'DOMAIN,anthropic.com.cdn.cloudflare.net,' + CLAUDE_GROUP,
+    'DOMAIN,anthropic-com.ghost.io,' + CLAUDE_GROUP,
+    # 认证鉴权
+    'DOMAIN,anthropic.auth0.com,' + CLAUDE_GROUP,
+    'DOMAIN-SUFFIX,auth0.com,' + CLAUDE_GROUP,
+    'DOMAIN-SUFFIX,clerk.anthropic.com,' + CLAUDE_GROUP,
+    # 监控/遥测/反欺诈风控（防封核心）
+    'DOMAIN-SUFFIX,sift.com,' + CLAUDE_GROUP,
+    'DOMAIN-SUFFIX,siftscience.com,' + CLAUDE_GROUP,
+    'DOMAIN-KEYWORD,sift,' + CLAUDE_GROUP,
+    'DOMAIN-SUFFIX,statsigapi.net,' + CLAUDE_GROUP,
+    'DOMAIN-SUFFIX,statsig.com,' + CLAUDE_GROUP,
+    'DOMAIN,browser-intake-us5-datadoghq.com,' + CLAUDE_GROUP,
+    'DOMAIN,browser-intake-datadoghq.com,' + CLAUDE_GROUP,
+    'DOMAIN-SUFFIX,datadoghq.com,' + CLAUDE_GROUP,
+    'DOMAIN-SUFFIX,datadoghq-browser-agent.com,' + CLAUDE_GROUP,
+    'DOMAIN-SUFFIX,sentry.io,' + CLAUDE_GROUP,
+    'DOMAIN,cdn.usefathom.com,' + CLAUDE_GROUP,
+    # 客服 / 支持
+    'DOMAIN-SUFFIX,intercom.io,' + CLAUDE_GROUP,
+    'DOMAIN-SUFFIX,intercomcdn.com,' + CLAUDE_GROUP,
+    # IP 段兜底（完全覆盖 Anthropic AS399358）
+    'IP-CIDR,160.79.104.0/21,' + CLAUDE_GROUP + ',no-resolve',
+    'IP-CIDR6,2607:6bc0::/32,' + CLAUDE_GROUP + ',no-resolve',
+]
+OPENAI_GROUP = '🎯OpenAI'
+CLIENT_OPENAI_RULES = [
+    'DOMAIN-SUFFIX,openai.com,' + OPENAI_GROUP,
+    'DOMAIN-SUFFIX,chatgpt.com,' + OPENAI_GROUP,
+    'DOMAIN-SUFFIX,oaistatic.com,' + OPENAI_GROUP,
+    'DOMAIN-SUFFIX,oaiusercontent.com,' + OPENAI_GROUP,
+    'DOMAIN-SUFFIX,auth0.openai.com,' + OPENAI_GROUP,
+]
 CLIENT_GOOGLE_RULES = [
     'DOMAIN,accounts.google.com,' + GOOGLE_GROUP,
     'DOMAIN,accounts.youtube.com,' + GOOGLE_GROUP,
@@ -171,6 +235,8 @@ CLIENT_MANGO_CF_RULES = CLIENT_MANGO_CF_EXCEPT_RULES + ['DOMAIN-SUFFIX,mangoqwq.
 _US_GOOGLE_NAME = re.compile(r'美国_BGP|北美洲】美国\d+原生')
 LOCAL_GROUP_VPS = 'vps-import'
 LOCAL_GROUP_GOOGLE = 'google'
+LOCAL_GROUP_OPENAI = 'openai'
+LOCAL_GROUP_CLAUDE = 'claude'
 LOCAL_GROUP_GROK = 'grok'
 
 
@@ -180,9 +246,42 @@ def _is_us_google_node(name: str) -> bool:
     if not n:
         return False
     low = n.lower()
-    if 'azure' in low or 'googlevps' in low or n.startswith('GVPS') or '香港' in n:
+    if 'azure' in low or 'googlevps' in low or strip_self_tag(n).startswith('GVPS') or '香港' in n:
         return False
     return _US_GOOGLE_NAME.search(n) is not None
+
+
+_US_OPENAI_NAME = re.compile(r'(?:US|美国|北美洲).*?(?:Vmess|Buyvm|原生|BGP)', re.IGNORECASE)
+
+
+def _is_us_openai_node(name: str) -> bool:
+    """Fallback US-OpenAI name filter when local-nodes.yaml has no groups.openai."""
+    n = str(name or '').strip()
+    if not n:
+        return False
+    low = n.lower()
+    if 'azure' in low or '香港' in low or 'hk' in low or 'sg' in low or 'jp' in low or '日本' in low or 'india' in low:
+        return False
+    if strip_self_tag(n) == 'TUIC-googlevps':
+        return True
+    return _US_OPENAI_NAME.search(n) is not None
+
+
+
+_US_CLAUDE_NAME = re.compile(r'(?:US|美国|北美洲).*?(?:Vmess|Buyvm|原生|BGP)', re.IGNORECASE)
+
+
+def _is_us_claude_node(name: str) -> bool:
+    """Fallback US-Claude name filter when local-nodes.yaml has no groups.claude."""
+    n = str(name or '').strip()
+    if not n:
+        return False
+    low = n.lower()
+    if 'azure' in low or '香港' in low or 'hk' in low or 'sg' in low or 'jp' in low or '日本' in low or 'india' in low:
+        return False
+    if strip_self_tag(n) == 'TUIC-googlevps':
+        return True
+    return _US_CLAUDE_NAME.search(n) is not None
 
 
 def normalize_simple_groups(raw: Any) -> Dict[str, List[str]]:
@@ -2113,8 +2212,9 @@ class SubscriptionEngine:
                 continue
             if name in ("DIRECT", "REJECT", "GLOBAL"):
                 continue
-            # Skip whitelisted prefixes
-            if any(name.startswith(pfx) for pfx in whitelist_prefixes):
+            # Skip whitelisted prefixes (accept both bare and [自建]-tagged forms)
+            bare_name = strip_self_tag(name)
+            if any(name.startswith(pfx) or bare_name.startswith(pfx) for pfx in whitelist_prefixes):
                 continue
             leaf_names.append(name)
 
@@ -2527,9 +2627,11 @@ class SubscriptionEngine:
         proxies = drop_unresolved_dialer_proxies(proxies)
         names = [str(p['name']) for p in proxies]
         available = set(names)
-        auto_members = names or ['DIRECT']
-        select_members = ['AUTO'] + names + ['DIRECT']
         simple_groups = load_local_node_groups(self.local_nodes_file)
+        # AUTO(url-test) 排除池文件 groups.auto-exclude 声明的节点(如链路被干扰的 AnyTLS-googlevps),select 组保留全量
+        auto_excluded = set(simple_groups.get('auto-exclude') or [])
+        auto_members = [n for n in names if n not in auto_excluded] or ['DIRECT']
+        select_members = ['AUTO'] + names + ['DIRECT']
         google_fallback = [n for n in names if _is_us_google_node(n)]
         google_members = resolve_simple_group(
             simple_groups,
@@ -2537,7 +2639,30 @@ class SubscriptionEngine:
             available,
             fallback=google_fallback,
         ) or ['PROXY']
+        claude_fallback = [n for n in names if _is_us_claude_node(n)]
+        claude_members = resolve_simple_group(
+            simple_groups,
+            LOCAL_GROUP_CLAUDE,
+            available,
+            fallback=claude_fallback,
+        ) or ['PROXY']
+        openai_fallback = [n for n in names if _is_us_openai_node(n)]
+        openai_members = resolve_simple_group(
+            simple_groups,
+            LOCAL_GROUP_OPENAI,
+            available,
+            fallback=openai_fallback,
+        ) or ['PROXY']
 
+        home_members = []
+        for bare in CLIENT_HOME_GROUP_FALLBACK:
+            if bare in CLIENT_BUILTIN_OUTBOUNDS:
+                home_members.append(bare)
+            elif SELF_TAG + bare in available:
+                home_members.append(SELF_TAG + bare)
+            elif bare in available:
+                home_members.append(bare)
+        home_members = home_members or ['DIRECT']
         doc: Dict[str, Any] = {
             'mixed-port': 7897,
             'allow-lan': client_allow_lan(),
@@ -2568,12 +2693,30 @@ class SubscriptionEngine:
                     'type': 'select',
                     'proxies': google_members,
                 },
+                {
+                    'name': CLAUDE_GROUP,
+                    'type': 'select',
+                    'proxies': claude_members,
+                },
+                {
+                    'name': OPENAI_GROUP,
+                    'type': 'select',
+                    'proxies': openai_members,
+                },
+                {
+                    'name': HOME_GROUP,
+                    'type': 'select',
+                    'proxies': home_members,
+                },
             ],
             'rules': (
                 list(CLIENT_MANGO_CF_RULES)
                 + list(CLIENT_DOMESTIC_MEDIA_RULES)
                 + list(CLIENT_STUN_RULES)
                 + list(CLIENT_DIRECT_RULES)
+                + list(CLIENT_HOME_BROADBAND_RULES)
+                + list(CLIENT_CLAUDE_RULES)
+                + list(CLIENT_OPENAI_RULES)
                 + list(CLIENT_GOOGLE_RULES)
                 + list(CLIENT_FINAL_RULES)
             ),

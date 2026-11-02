@@ -60,7 +60,7 @@ node scripts/3xui-health/guard-test.js
 
 ## 注意
 
-- 浮动节点（`AnyTLS-googlevps`、`VN Hanoi ×2`）仲裁时已保留。
+- 浮动节点（`AnyTLS-googlevps`，自建已改 `[自建] AnyTLS-googlevps`、`VN Hanoi ×2`）仲裁时已保留。
 - Script.js 是全局脚本，任何名字命中都会在该指纹生效的配置里删除；
   改名单前先确认没有其他订阅复用同名。
 - 每次改动前 `Script.js` 都有时间戳备份，回滚直接覆盖即可。

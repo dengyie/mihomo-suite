@@ -32,20 +32,22 @@ const outNames = new Set((out.proxies || []).map((p) => p?.name).filter(Boolean)
 // 1. all excluded names gone from proxies
 for (const n of exclude) ok(!outNames.has(n), `proxy still present: ${n}`);
 
-// 2. expected survivors
+// 2. expected survivors -- self-built nodes may carry the optional "[自建] " tag
+const SELF_TAG = "[自建] ";
 const mustHave = [
   "VLESS-Huawei-SH-Reality", "[share] 🇺🇸US-Vmess2(Bwh)", "🏠home-win-CF",
   "[tomorin] [anytls]VN Hanoi VNPT", "AnyTLS-googlevps", "[share] 🇭🇰HK-Warp1(Sak)",
   "[tomorin] US LAS Buyvm", "TUIC-Azure", "🇸🇬【亚洲】新加坡03丨直连",
 ];
-for (const n of mustHave) ok(outNames.has(n), `alive node missing: ${n}`);
+for (const n of mustHave) ok(outNames.has(n) || outNames.has(SELF_TAG + n), `alive node missing: ${n}`);
 // 44 subscription survivors + 1 script-injected home-win-mesh
 ok(outNames.size === 45, `proxy count ${outNames.size} != 45`);
 
 // 3. mesh node injected and first member of 🏠家宽
-ok(outNames.has("🏠home-win-mesh"), "home-win-mesh not injected");
+const MESH = outNames.has(SELF_TAG + "🏠home-win-mesh") ? SELF_TAG + "🏠home-win-mesh" : "🏠home-win-mesh";
+ok(outNames.has(MESH), "home-win-mesh not injected");
 const home = (out["proxy-groups"] || []).find((g) => g?.name === "🏠家宽");
-ok(home && Array.isArray(home.proxies) && home.proxies[0] === "🏠home-win-mesh", "家宽 group mesh-first broken");
+ok(home && Array.isArray(home.proxies) && home.proxies[0] === MESH, "家宽 group mesh-first broken");
 
 // 4. no group references excluded names / no empty groups
 const groupNames = new Set((out["proxy-groups"] || []).map((g) => g?.name).filter(Boolean));

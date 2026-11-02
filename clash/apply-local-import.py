@@ -5,6 +5,13 @@ The node file holds proxies plus simple name lists under ``groups``. This
 script only fills ``🌐 本机导入`` from ``groups.vps-import``. url-test / PROXY /
 Grok / Google strategy stays elsewhere. Unchanged files are not rewritten;
 a changed live config is reloaded once through 9090.
+
+Self-built nodes carry a ``[自建] `` name prefix and the pool file is the single
+source of truth for it. This script mirrors that prefix onto every live config
+(proxy names, dialer-proxy, group members, listener targets and rule
+destinations) and retires the untagged twin, so a rename never leaves a
+duplicate behind. Nodes whose name already carries the prefix are exempt from
+the subscription-orphan sweep below.
 """
 from __future__ import annotations
 
@@ -21,10 +28,21 @@ import yaml
 ROOT = Path(os.environ.get('CLASH_ROOT', '/personal/clash')).resolve()
 GROUP = '🌐 本机导入'
 VPS_GROUP = 'vps-import'
+SELF_TAG = '[自建] '
 THIRD_PARTY_PREFIXES = tuple(
     p.strip() for p in os.environ.get('THIRD_PARTY_PREFIXES', 'SUB-,JX-,GL-,JS-,KQ-').split(',') if p.strip()
 )
 BLOCKED_NAMES = {'续费备用节点', 'PXED-BRIDGE'}
+# Self-built nodes that only exist in the live configs (legacy 3x-ui leftovers,
+# no longer produced by any active subscription). Tag them in place so they
+# stop looking like airport nodes; they are never added or removed here.
+LEGACY_SELF_BUILT = (
+    'GVPS-AnyTLS-googlevps',
+    'GVPS-TUIC-googlevps',
+    'GVPS-Aliyun-BJ-SOCKS',
+    'Azure-HK-TUIC',
+    '🏠home-win-mesh',
+)
 
 
 def is_third_party_or_blocked(name: str) -> bool:
@@ -42,6 +60,136 @@ def is_auto_excluded(name: str) -> bool:
     if low.startswith('bk-'):
         return True
     return any(k in low for k in ('azure', 'reverse', '17897', 'home-win', 'pxed-bridge'))
+
+
+def strip_self_tag(name: str) -> str:
+    """Return the bare node name without the ``[自建] `` prefix."""
+    return name[len(SELF_TAG):] if name.startswith(SELF_TAG) else name
+
+
+def is_disabled(name: str, disabled: set[str]) -> bool:
+    """True when the node is denylisted under either its bare or tagged name."""
+    return name in disabled or strip_self_tag(name) in disabled
+
+
+def same_upstream(a: dict, b: dict) -> bool:
+    """True when two proxies dial the same endpoint (server/port/type)."""
+    return (
+        str(a.get('server')) == str(b.get('server'))
+        and a.get('port') == b.get('port')
+        and a.get('type') == b.get('type')
+    )
+
+
+def self_tag_map(proxies) -> dict[str, str]:
+    """Map every already-tagged pool proxy to ``bare_name -> '[自建] name'``."""
+    mapping: dict[str, str] = {}
+    for proxy in proxies or []:
+        if not isinstance(proxy, dict):
+            continue
+        name = proxy.get('name')
+        if isinstance(name, str) and name.startswith(SELF_TAG) and len(name) > len(SELF_TAG):
+            mapping[strip_self_tag(name)] = name
+    for name in LEGACY_SELF_BUILT:
+        mapping.setdefault(name, SELF_TAG + name)
+    return mapping
+
+
+def _rename_targets(groups, listeners, rules, mapping: dict[str, str]) -> int:
+    """Rewrite group members, listener ``proxy`` and rule destinations.
+
+    Only exact matches of a bare name are rewritten; already-tagged or
+    unrelated names pass through untouched. Returns number of edits.
+    """
+    edits = 0
+    for group in groups or []:
+        if not isinstance(group, dict):
+            continue
+        members = group.get('proxies')
+        if isinstance(members, list):
+            written = []
+            for member in members:
+                written.append(mapping.get(member, member) if isinstance(member, str) else member)
+            if written != members:
+                edits += 1
+                group['proxies'] = written
+        dialer = group.get('dialer-proxy')
+        if isinstance(dialer, str) and dialer in mapping:
+            group['dialer-proxy'] = mapping[dialer]
+            edits += 1
+    for listener in listeners or []:
+        if not isinstance(listener, dict):
+            continue
+        target = listener.get('proxy')
+        if isinstance(target, str) and target in mapping:
+            listener['proxy'] = mapping[target]
+            edits += 1
+    if isinstance(rules, list):
+        written = []
+        changed = False
+        for rule in rules:
+            if not isinstance(rule, str):
+                written.append(rule)
+                continue
+            head, sep, tail = rule.rpartition(',')
+            if sep and tail in mapping:
+                written.append(f'{head},{mapping[tail]}')
+                changed = True
+            else:
+                written.append(rule)
+        if changed:
+            rules[:] = written
+            edits += 1
+    return edits
+
+
+def rename_self_built(data: dict, imported: list[dict]) -> tuple[int, int]:
+    """Mirror the pool's ``[自建]`` prefix onto a live config, idempotently.
+
+    * proxies: bare ``VLESS-Azure-Reality`` -> ``[自建] VLESS-Azure-Reality``;
+      when a tagged twin already exists and dials the same upstream, the bare
+      copy is retired instead of renamed (no duplicate names).
+    * every structural reference follows: dialer-proxy, group members,
+      listener ``proxy``, rule destinations.
+    Returns ``(nodes_renamed_or_retired, reference_edits)``.
+    """
+    mapping = self_tag_map(imported)
+    if not mapping:
+        return 0, 0
+    proxies = data.get('proxies') or []
+    tagged = {
+        p['name']: p
+        for p in proxies
+        if isinstance(p, dict)
+        and isinstance(p.get('name'), str)
+        and p['name'].startswith(SELF_TAG)
+    }
+    nodes = 0
+    kept = []
+    for proxy in proxies:
+        if not isinstance(proxy, dict) or not isinstance(proxy.get('name'), str):
+            kept.append(proxy)
+            continue
+        name = proxy['name']
+        new_name = mapping.get(name)
+        if new_name is not None:
+            twin = tagged.get(new_name)
+            if twin is None:
+                proxy['name'] = new_name
+                nodes += 1
+            elif same_upstream(proxy, twin):
+                nodes += 1
+                continue  # bare duplicate retired; tagged twin already present
+            # else: same name but a different upstream -> leave it alone.
+        dialer = proxy.get('dialer-proxy')
+        if isinstance(dialer, str) and dialer in mapping:
+            proxy['dialer-proxy'] = mapping[dialer]
+        kept.append(proxy)
+    data['proxies'] = kept
+    refs = _rename_targets(
+        data.get('proxy-groups'), data.get('listeners'), data.get('rules'), mapping
+    )
+    return nodes, refs
 
 
 def resolve_airport(root: Path) -> Path:
@@ -90,7 +238,7 @@ def normalize_simple_groups(raw) -> dict[str, list[str]]:
     return groups
 
 
-def load_vps_import(path: Path) -> tuple[list[dict], list[str]] | None:
+def load_vps_import(path: Path) -> tuple[list[dict], list[str], list[dict]] | None:
     data = yaml.safe_load(path.read_text()) or {}
     if isinstance(data, list):
         proxies = data
@@ -109,11 +257,27 @@ def load_vps_import(path: Path) -> tuple[list[dict], list[str]] | None:
     }
     names = [name for name in groups[VPS_GROUP] if name in by_name]
     imported = [by_name[name] for name in names]
-    return imported, names
+    return imported, names, proxies
 
 
-def build_data(target: Path, imported: list[dict], disabled: set[str]) -> tuple[dict, int, int]:
+def home_pref(bare: str, valid_references: set[str]) -> str | None:
+    """Prefer the ``[自建]``-tagged name, fall back to the bare name."""
+    tagged = SELF_TAG + bare
+    if tagged in valid_references:
+        return tagged
+    if bare in valid_references:
+        return bare
+    return None
+
+
+def build_data(
+    target: Path,
+    imported: list[dict],
+    disabled: set[str],
+    pool_proxies: list[dict] | None = None,
+) -> tuple[dict, int, int]:
     data = yaml.safe_load(target.read_text()) or {}
+    rename_self_built(data, pool_proxies if pool_proxies is not None else imported)
     proxies = data.get('proxies') or []
     existing = {
         proxy.get('name')
@@ -122,7 +286,7 @@ def build_data(target: Path, imported: list[dict], disabled: set[str]) -> tuple[
     }
     added = [
         proxy for proxy in imported
-        if proxy.get('name') not in existing and proxy.get('name') not in disabled
+        if proxy.get('name') not in existing and not is_disabled(proxy.get('name'), disabled)
     ]
     if added:
         data.setdefault('proxies', []).extend(added)
@@ -138,7 +302,7 @@ def build_data(target: Path, imported: list[dict], disabled: set[str]) -> tuple[
         group['proxies'] = [
             proxy.get('name')
             for proxy in imported
-            if proxy.get('name') not in disabled and proxy.get('name') in all_names
+            if not is_disabled(proxy.get('name'), disabled) and proxy.get('name') in all_names
         ]
     else:
         for gname in ('PROXY', 'AUTO'):
@@ -147,7 +311,7 @@ def build_data(target: Path, imported: list[dict], disabled: set[str]) -> tuple[
                 current_members = list(grp.get('proxies') or [])
                 for proxy in imported:
                     pname = proxy.get('name')
-                    if pname and pname not in disabled and pname in all_names and pname not in current_members:
+                    if pname and not is_disabled(pname, disabled) and pname in all_names and pname not in current_members:
                         if gname == 'AUTO' and is_auto_excluded(pname):
                             continue
                         current_members.append(pname)
@@ -159,7 +323,8 @@ def build_data(target: Path, imported: list[dict], disabled: set[str]) -> tuple[
     # is present in the live config but no longer in the active vps-import
     # whitelist is an orphan (deleted/renamed/refreshed-away subscription); drop
     # it from the proxies list so the delete actually propagates to the live
-    # config instead of persisting in PROXY across reloads.
+    # config instead of persisting in PROXY across reloads. Self-built nodes
+    # share the bracket syntax but are hand-managed, so ``[自建] `` is exempt.
     imported_names = {p.get('name') for p in imported if isinstance(p, dict) and p.get('name')}
     injected_prefix = re.compile(r'^\[[^\]]+\] ')
     for proxy in data.get('proxies') or []:
@@ -167,8 +332,13 @@ def build_data(target: Path, imported: list[dict], disabled: set[str]) -> tuple[
             continue
         p_name = proxy.get('name')
         p_name = p_name if isinstance(p_name, str) else (str(p_name) if p_name is not None else '')
-        orphan = bool(injected_prefix.match(p_name)) and p_name not in imported_names and p_name not in disabled
-        if not p_name or p_name in disabled or is_third_party_or_blocked(p_name) or orphan:
+        orphan = (
+            bool(injected_prefix.match(p_name))
+            and not p_name.startswith(SELF_TAG)
+            and p_name not in imported_names
+            and not is_disabled(p_name, disabled)
+        )
+        if not p_name or is_disabled(p_name, disabled) or is_third_party_or_blocked(p_name) or orphan:
             removed += 1
         else:
             kept.append(proxy)
@@ -183,7 +353,7 @@ def build_data(target: Path, imported: list[dict], disabled: set[str]) -> tuple[
             g_name = item.get('name')
             cleaned = [
                 name for name in (item.get('proxies') or [])
-                if name in valid_references and name not in disabled and not is_third_party_or_blocked(name)
+                if name in valid_references and not is_disabled(name, disabled) and not is_third_party_or_blocked(name)
             ]
             if g_name == 'AUTO':
                 cleaned = [name for name in cleaned if not is_auto_excluded(name)]
@@ -195,11 +365,12 @@ def build_data(target: Path, imported: list[dict], disabled: set[str]) -> tuple[
                 # 落到国内 Reality 节点(cpa-clean-egress 语义是住宅家宽出口);
                 # mesh 与 CF 同一家宽出口但经 easytier 直连更稳, CF 降为次选。
                 # 仅对 fallback 形态生效, 不动 config.mac-merged 的 select 形态。
-                prefs = ('🏠home-win-CF', '🏠home-win-mesh') if item.get('type') == 'fallback' else ('🏠home-win-CF',)
+                bare = ('🏠home-win-CF', '🏠home-win-mesh') if item.get('type') == 'fallback' else ('🏠home-win-CF',)
+                prefs = tuple(p for p in (home_pref(b, valid_references) for b in bare) if p)
                 for pref in prefs:
-                    if pref in valid_references and pref not in cleaned:
+                    if pref not in cleaned:
                         cleaned.insert(0, pref)
-                    elif pref in cleaned and cleaned[0] != pref:
+                    elif cleaned[0] != pref:
                         cleaned.remove(pref)
                         cleaned.insert(0, pref)
             if not cleaned:
@@ -259,7 +430,7 @@ def main() -> None:
     if loaded is None:
         print(f'{airport.name}: no groups.{VPS_GROUP}; skip (refusing full-file dump)')
         return
-    imported, names = loaded
+    imported, names, pool_proxies = loaded
     if not names:
         print(f'{airport.name}: groups.{VPS_GROUP} empty; skip')
         return
@@ -274,7 +445,7 @@ def main() -> None:
         print('no clash config targets; skip')
         return
     for target in targets:
-        data, added, removed = build_data(target, imported, disabled)
+        data, added, removed = build_data(target, imported, disabled, pool_proxies)
         rendered = yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=120)
         current = target.read_text()
         if rendered == current:

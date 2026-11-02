@@ -763,7 +763,75 @@ def test_client_clash_export_webrtc_stun_and_media_rules_ordering(temp_clash_roo
     assert idx_media < idx_stun_domain
     assert idx_stun_domain < idx_cf
     assert idx_stun_port < idx_cf
-    assert sm.CLIENT_EXPORT_RENDER_REV == "8"
+    assert sm.CLIENT_EXPORT_RENDER_REV == "12"
+
+
+def test_client_home_broadband_group_routes_hybgzs(temp_clash_root):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
+    (temp_clash_root / "airports" / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": "🏠home-win-CF", "type": "vless", "server": "home.example.com", "port": 443},
+                    {"name": "HK-Reality", "type": "vless", "server": "hk.example.com", "port": 443},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    yaml_text = engine.render_client_clash_config(fetch_remote=False)
+    assert sm.validate_client_clash_yaml(yaml_text) == []
+
+    doc = yaml.safe_load(yaml_text)
+    groups = {g["name"]: g for g in doc["proxy-groups"]}
+    home = groups[sm.HOME_GROUP]
+    assert home["type"] == "select"
+    assert home["proxies"] == ["🏠home-win-CF", "DIRECT"]
+
+    rule = "DOMAIN-SUFFIX,hybgzs.com,%s" % sm.HOME_GROUP
+    assert rule in doc["rules"]
+    # 家宽规则必须早于 MATCH 兜底
+    assert doc["rules"].index(rule) < doc["rules"].index("MATCH,PROXY")
+
+
+def test_client_home_group_prefers_tagged_home_win(temp_clash_root):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
+    (temp_clash_root / "airports" / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": "[自建] 🏠home-win-CF", "type": "vless", "server": "home.example.com", "port": 443},
+                    {"name": "[自建] VLESS-Azure-Reality", "type": "vless", "server": "2.2.2.2", "port": 443},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    doc = yaml.safe_load(engine.render_client_clash_config(fetch_remote=False))
+    groups = {g["name"]: g for g in doc["proxy-groups"]}
+    assert groups[sm.HOME_GROUP]["proxies"] == ["[自建] 🏠home-win-CF", "DIRECT"]
+
+
+def test_client_home_broadband_group_falls_back_to_direct_without_node(temp_clash_root):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
+    (temp_clash_root / "airports" / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": "HK-Reality", "type": "vless", "server": "hk.example.com", "port": 443},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    yaml_text = engine.render_client_clash_config(fetch_remote=False)
+    assert sm.validate_client_clash_yaml(yaml_text) == []
+    doc = yaml.safe_load(yaml_text)
+    groups = {g["name"]: g for g in doc["proxy-groups"]}
+    assert groups[sm.HOME_GROUP]["proxies"] == ["DIRECT"]
 
 
 def test_client_google_group_uses_us_nodes_not_azure(temp_clash_root, monkeypatch):
@@ -1571,6 +1639,167 @@ def test_apply_local_import_sanitizes_special_groups(temp_clash_root, monkeypatc
     # cpa-clean-egress should have 🏠home-win-CF at the front, and no reverse/17897 nodes
     assert groups["cpa-clean-egress"]["proxies"][0] == "🏠home-win-CF"
     assert "Mac-Reverse-17897" not in groups["cpa-clean-egress"]["proxies"]
+
+
+def _run_apply_local_import(temp_clash_root, monkeypatch):
+    monkeypatch.delenv("APPLY_LOCAL_IMPORT_FILE", raising=False)
+    monkeypatch.setenv("CLASH_ROOT", str(temp_clash_root))
+    ali = _load_apply_local_import()
+    ali.ROOT = temp_clash_root
+    ali.main()
+    return ali
+
+
+def test_apply_local_import_mirrors_self_tag_onto_config(temp_clash_root, monkeypatch):
+    """A bare node present in the pool as [自建] X is renamed, refs follow."""
+    airports = temp_clash_root / "airports"
+    airports.mkdir(parents=True, exist_ok=True)
+    (airports / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": "[自建] VLESS-Azure-Reality", "type": "vless", "server": "2.2.2.2", "port": 443},
+                    {
+                        "name": "[自建] TUIC-googlevps",
+                        "type": "tuic",
+                        "server": "3.3.3.3",
+                        "port": 443,
+                        "dialer-proxy": "[自建] AnyTLS-googlevps",
+                    },
+                    {"name": "[自建] AnyTLS-googlevps", "type": "anytls", "server": "3.3.3.3", "port": 8443},
+                ],
+                "groups": {"vps-import": ["[自建] VLESS-Azure-Reality"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = temp_clash_root / "config.yaml"
+    cfg.write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": "VLESS-Azure-Reality", "type": "vless", "server": "2.2.2.2", "port": 443},
+                    {
+                        "name": "TUIC-googlevps",
+                        "type": "tuic",
+                        "server": "3.3.3.3",
+                        "port": 443,
+                        "dialer-proxy": "AnyTLS-googlevps",
+                    },
+                    {
+                        "name": "Some-Node",
+                        "type": "ss",
+                        "server": "9.9.9.9",
+                        "port": 1,
+                        "dialer-proxy": "VLESS-Azure-Reality",
+                    },
+                ],
+                "proxy-groups": [
+                    {"name": "PROXY", "type": "select", "proxies": ["VLESS-Azure-Reality", "Some-Node"]},
+                ],
+                "listeners": [
+                    {"name": "l1", "type": "mixed", "port": 10818, "proxy": "VLESS-Azure-Reality"},
+                ],
+                "rules": ["IN-USER,zen_key_2,VLESS-Azure-Reality", "MATCH,PROXY"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _run_apply_local_import(temp_clash_root, monkeypatch)
+    doc = yaml.safe_load(cfg.read_text())
+    names = [p["name"] for p in doc["proxies"]]
+    assert "[自建] VLESS-Azure-Reality" in names
+    assert "VLESS-Azure-Reality" not in names
+    assert "[自建] TUIC-googlevps" in names
+
+    proxies = {p["name"]: p for p in doc["proxies"]}
+    assert proxies["Some-Node"]["dialer-proxy"] == "[自建] VLESS-Azure-Reality"
+    assert proxies["[自建] TUIC-googlevps"]["dialer-proxy"] == "[自建] AnyTLS-googlevps"
+    groups = {g["name"]: g for g in doc["proxy-groups"]}
+    assert "VLESS-Azure-Reality" not in groups["PROXY"]["proxies"]
+    assert "[自建] VLESS-Azure-Reality" in groups["PROXY"]["proxies"]
+    assert doc["listeners"][0]["proxy"] == "[自建] VLESS-Azure-Reality"
+    assert doc["rules"][0] == "IN-USER,zen_key_2,[自建] VLESS-Azure-Reality"
+
+
+def test_apply_local_import_retires_bare_twin_of_tagged_node(temp_clash_root, monkeypatch):
+    """Both bare and tagged copies on the same upstream -> keep only the tagged."""
+    airports = temp_clash_root / "airports"
+    airports.mkdir(parents=True, exist_ok=True)
+    (airports / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": "[自建] TUIC-Azure", "type": "tuic", "server": "4.4.4.4", "port": 443},
+                ],
+                "groups": {"vps-import": ["[自建] TUIC-Azure"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = temp_clash_root / "config.yaml"
+    cfg.write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": "TUIC-Azure", "type": "tuic", "server": "4.4.4.4", "port": 443},
+                    {"name": "[自建] TUIC-Azure", "type": "tuic", "server": "4.4.4.4", "port": 443},
+                    # Same bare name but a different upstream: must not be touched.
+                    {"name": "TUIC-Azure", "type": "tuic", "server": "5.5.5.5", "port": 443},
+                ],
+                "proxy-groups": [
+                    {"name": "PROXY", "type": "select", "proxies": ["TUIC-Azure", "[自建] TUIC-Azure"]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _run_apply_local_import(temp_clash_root, monkeypatch)
+    doc = yaml.safe_load(cfg.read_text())
+    names = [p["name"] for p in doc["proxies"]]
+    assert names.count("[自建] TUIC-Azure") == 1
+    # The bare name on a different upstream is left untouched (not our node).
+    assert "TUIC-Azure" in names
+    servers = [p["server"] for p in doc["proxies"] if p["name"] == "[自建] TUIC-Azure"]
+    assert servers == ["4.4.4.4"]
+
+
+def test_apply_local_import_keeps_self_tagged_orphan(temp_clash_root, monkeypatch):
+    """[自建] nodes are hand-managed and must survive the orphan sweep."""
+    airports = temp_clash_root / "airports"
+    airports.mkdir(parents=True, exist_ok=True)
+    (airports / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [{"name": "Keep-VPS", "type": "ss", "server": "9.9.9.9", "port": 1}],
+                "groups": {"vps-import": ["Keep-VPS"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = temp_clash_root / "config.yaml"
+    cfg.write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": "Keep-VPS", "type": "ss", "server": "9.9.9.9", "port": 1},
+                    {"name": "[自建] Hand-Made", "type": "vless", "server": "1.2.3.4", "port": 443},
+                    {"name": "[DelMe] Orphan", "type": "ss", "server": "8.8.4.4", "port": 8388},
+                ],
+                "proxy-groups": [
+                    {"name": "PROXY", "type": "select", "proxies": ["Keep-VPS", "[自建] Hand-Made", "[DelMe] Orphan"]},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    _run_apply_local_import(temp_clash_root, monkeypatch)
+    doc = yaml.safe_load(cfg.read_text())
+    names = [p["name"] for p in doc["proxies"]]
+    assert "[自建] Hand-Made" in names
+    assert "[DelMe] Orphan" not in names
+    groups = {g["name"]: g for g in doc["proxy-groups"]}
+    assert groups["PROXY"]["proxies"] == ["Keep-VPS", "[自建] Hand-Made"]
 
 
 def test_add_remote_fetch_failure_is_not_success(temp_clash_root):
