@@ -70,15 +70,31 @@ FLAG_RE = re.compile('^[\U0001F1E6-\U0001F1FF]{2}')
 
 
 def strip_self_tag(name: str) -> str:
-    """Return the bare node name without the ``[自建] `` prefix or region flag."""
-    if name.startswith(SELF_TAG):
-        name = name[len(SELF_TAG):]
-    return FLAG_RE.sub('', name)
+    """Return the bare node name without the ``[自建] `` prefix or region flag.
+
+    The flag is only stripped for self-built nodes: airport names legitimately
+    carry a leading flag as part of their own name ("🇸🇬【亚洲】新加坡03丨直连"),
+    so stripping it there would silently widen denylist/whitelist matching.
+    Mirrors ``stripTag`` in scripts/3xui-health/harness.js.
+    """
+    if not name.startswith(SELF_TAG):
+        return name
+    return FLAG_RE.sub('', name[len(SELF_TAG):])
+
+
+def denylist_keys(name: str) -> tuple[str, ...]:
+    """All historical spellings a denylist entry for ``name`` may use.
+
+    Covers the bare name, the flagged tagged form and the pre-flag tagged form,
+    so an entry written before a rename keeps matching after it.
+    """
+    bare = strip_self_tag(name)
+    return (name, SELF_TAG + bare, bare)
 
 
 def is_disabled(name: str, disabled: set[str]) -> bool:
-    """True when the node is denylisted under either its bare or tagged name."""
-    return name in disabled or strip_self_tag(name) in disabled
+    """True when the node is denylisted under any of its known spellings."""
+    return any(key in disabled for key in denylist_keys(name))
 
 
 def same_upstream(a: dict, b: dict) -> bool:
@@ -303,13 +319,19 @@ def load_vps_import(path: Path) -> tuple[list[dict], list[str], list[dict]] | No
 
 
 def home_pref(bare: str, valid_references: set[str]) -> str | None:
-    """Prefer the ``[自建]``-tagged name, fall back to the bare name."""
-    tagged = SELF_TAG + bare
-    if tagged in valid_references:
-        return tagged
-    if bare in valid_references:
-        return bare
-    return None
+    """Resolve a home-broadband node to its live reference, flag/prefix agnostic.
+
+    Matches on the name with ``[自建] `` + region flag stripped, so a future flag
+    on ``🏠home-win-*`` cannot silently break the 10818 egress preference chain.
+    Prefers the longest match (the tagged form) so the choice is deterministic.
+    """
+    candidates = sorted(
+        (ref for ref in valid_references
+         if isinstance(ref, str) and (ref == bare or strip_self_tag(ref) == bare)),
+        key=len,
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
 
 
 def build_data(

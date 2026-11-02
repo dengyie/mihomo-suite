@@ -66,10 +66,29 @@ SELF_FLAG_RE = re.compile('^[\U0001F1E6-\U0001F1FF]{2}')
 
 
 def strip_self_tag(name: str) -> str:
-    """Remove the ``[自建] `` prefix and region flag so name-based policy keeps matching."""
-    if name.startswith(SELF_TAG):
-        name = name[len(SELF_TAG):]
-    return SELF_FLAG_RE.sub('', name)
+    """Remove the ``[自建] `` prefix so name-based policy keeps matching.
+
+    The region flag is only stripped for self-built nodes. Airport names
+    legitimately carry a leading flag as part of their own name
+    ("🇸🇬【亚洲】新加坡03丨直连"), so stripping it there would silently widen
+    whitelist/denylist matching (mirrors scripts/3xui-health/harness.js).
+    """
+    if not name.startswith(SELF_TAG):
+        return name
+    return SELF_FLAG_RE.sub('', name[len(SELF_TAG):])
+
+
+def is_denylisted(name: str, denylist) -> bool:
+    """True when ``name`` appears in the denylist under any historical spelling.
+
+    Covers the bare name, the flagged ``[自建] `` form and the pre-flag tagged
+    form, so an entry written before a rename keeps matching after it, and all
+    consumers of disabled-nodes.txt agree on one matching rule.
+    """
+    if not isinstance(name, str):
+        return False
+    bare = strip_self_tag(name)
+    return any(p in denylist for p in (name, SELF_TAG + bare, bare))
 _LOG = logging.getLogger('mango-clash-export')
 
 # Client Clash export: DNS bootstrap that avoids TUN + fake-ip deadlock.
@@ -895,7 +914,13 @@ def save_disabled_nodes(names: Set[str], disabled_path: Optional[Path] = None) -
         l.strip() for l in existing_lines
         if l.strip() and not l.strip().startswith('#')
     }
-    merged_set = existing_set | {n.strip() for n in names if n.strip()}
+    # Self-built nodes are recorded under their bare name (tag + flag stripped)
+    # so an entry survives a later rename/flag change instead of going stale.
+    merged_set = existing_set | {
+        (strip_self_tag(n.strip()) if n.strip().startswith(SELF_TAG) else n.strip())
+        for n in names
+        if n.strip()
+    }
     sorted_names = sorted(merged_set)
 
     content = "\n".join(header_lines) + "\n" + "\n".join(sorted_names) + "\n"
@@ -939,7 +964,7 @@ def reconcile_target_config(
         old_sub_node_names = {str(n) for n in sub_group['proxies']}
 
     if active_proxies is not None:
-        active_proxy_names = [p['name'] for p in active_proxies if isinstance(p, dict) and 'name' in p and p['name'] not in denylist]
+        active_proxy_names = [p['name'] for p in active_proxies if isinstance(p, dict) and 'name' in p and not is_denylisted(p['name'], denylist)]
         active_name_set = set(active_proxy_names)
 
         # Filter out stale subscription nodes and denylisted nodes from proxies and add active proxies
@@ -947,7 +972,7 @@ def reconcile_target_config(
         for p in proxies:
             if isinstance(p, dict):
                 p_name = p.get('name')
-                if p_name in denylist:
+                if is_denylisted(p_name, denylist):
                     continue
                 if p_name in old_sub_node_names and p_name not in active_name_set:
                     continue
@@ -955,12 +980,12 @@ def reconcile_target_config(
                     continue
                 kept_proxies.append(p)
         for p in active_proxies:
-            if isinstance(p, dict) and p.get('name') not in denylist:
+            if isinstance(p, dict) and not is_denylisted(p.get('name'), denylist):
                 kept_proxies.append(p)
     else:
         # Only prune denylisted nodes
-        kept_proxies = [p for p in proxies if isinstance(p, dict) and p.get('name') not in denylist]
-        active_proxy_names = [n for n in old_sub_node_names if n not in denylist]
+        kept_proxies = [p for p in proxies if isinstance(p, dict) and not is_denylisted(p.get('name'), denylist)]
+        active_proxy_names = [n for n in old_sub_node_names if not is_denylisted(n, denylist)]
         active_name_set = set(active_proxy_names)
 
     # Check if proxies actually changed
@@ -982,12 +1007,12 @@ def reconcile_target_config(
 
     # 4. Clean up stale subscription node names and disabled nodes from all other proxy groups
     stale_sub_nodes = (old_sub_node_names - active_name_set) if active_proxies is not None else set()
-    removal_set = stale_sub_nodes | denylist
     for g in groups:
         if isinstance(g, dict) and 'proxies' in g and isinstance(g['proxies'], list):
             if g.get('name') == SUB_GROUP_NAME:
                 continue
-            cleaned = [n for n in g['proxies'] if n not in removal_set]
+            cleaned = [n for n in g['proxies']
+                       if n not in stale_sub_nodes and not is_denylisted(n, denylist)]
             if not cleaned:
                 cleaned = ['DIRECT']
             if cleaned != g['proxies']:
@@ -2225,9 +2250,10 @@ class SubscriptionEngine:
                 continue
             leaf_names.append(name)
 
-        # Exclude already disabled nodes from testing
+        # Exclude already disabled nodes from testing (matched under any of
+        # the node's historical spellings, see is_denylisted).
         existing_disabled = load_disabled_nodes(self.disabled_file)
-        to_test = [n for n in leaf_names if n not in existing_disabled]
+        to_test = [n for n in leaf_names if not is_denylisted(n, existing_disabled)]
 
         # Safety: default cap to max 30 candidates per invocation to prevent long-running blocking requests
         if max_candidates and len(to_test) > max_candidates:
@@ -2237,6 +2263,7 @@ class SubscriptionEngine:
         tested_count = 0
         alive_nodes: List[Dict[str, Any]] = []
         newly_dead: List[str] = []
+        dead_self_built: List[str] = []
 
         def probe_node(name: str) -> Tuple[str, Optional[int]]:
             q_name = urllib.parse.quote(name, safe="")
@@ -2267,6 +2294,12 @@ class SubscriptionEngine:
                 tested_count += 1
                 if delay is not None:
                     alive_nodes.append({"name": name, "delay": delay})
+                elif name.startswith(SELF_TAG):
+                    # Self-built nodes are hand-managed from the pool file. A
+                    # transient failure (peering/BGP return-path drop, host
+                    # restart) must not permanently blacklist them and rip them
+                    # out of the live config: report, never persist.
+                    dead_self_built.append(name)
                 else:
                     newly_dead.append(name)
 
@@ -2293,6 +2326,7 @@ class SubscriptionEngine:
             "alive_count": len(alive_nodes),
             "dead_count": len(newly_dead),
             "newly_dead": newly_dead,
+            "dead_self_built": dead_self_built,  # reported, never persisted
             "alive": alive_nodes[:20],  # Sample of alive nodes
             "applied_filter": apply_filter,
             "targets_updated": targets_updated,
@@ -2414,7 +2448,10 @@ class SubscriptionEngine:
         with SubscriptionLock(self.lock_file):
             existing = load_local_nodes_file(self.local_nodes_file)
             already = load_disabled_nodes(self.disabled_file)
-            to_test = [n for n in existing if str(n.get('name') or '').strip() not in already]
+            to_test = [
+                n for n in existing
+                if not is_denylisted(str(n.get('name') or '').strip(), already)
+            ]
 
         to_test, truncated = _cap_probe_candidates(to_test)
         alive, dead = probe_nodes(
@@ -2424,7 +2461,16 @@ class SubscriptionEngine:
             keep_ssrf=True,
         )
         dead_keys = {_node_endpoint_key(n) for n in dead if str(n.get('name') or '').strip()}
-        newly_dead = [key[0] for key in dead_keys if key[0]]
+        # Split the dead set: self-built nodes are hand-managed and must never be
+        # deleted from the pool source of truth nor blacklisted, so they are
+        # reported separately and excluded from the drop/prune bookkeeping.
+        dead_self_built = sorted(
+            key[0] for key in dead_keys if key[0] and key[0].startswith(SELF_TAG)
+        )
+        newly_dead = sorted(
+            key[0] for key in dead_keys if key[0] and not key[0].startswith(SELF_TAG)
+        )
+        protected_keys = {key for key in dead_keys if key[0] and key[0].startswith(SELF_TAG)}
         skipped_replaced = 0
         if apply_filter:
             with SubscriptionLock(self.lock_file):
@@ -2435,15 +2481,23 @@ class SubscriptionEngine:
                 dropped_keys: Set[Tuple[str, str, Optional[int]]] = set()
                 for n in current:
                     name = str(n.get('name') or '').strip()
-                    if name in already:
+                    if is_denylisted(name, already):
                         continue
                     key = _node_endpoint_key(n)
                     if key in dead_keys:
+                        # Self-built nodes are hand-managed from the pool file.
+                        # Never permanently remove them from the source of truth;
+                        # transient failures (BGP return-path drop, host restart)
+                        # must not rip them out of all configs at once. Report
+                        # the bad event but keep the pool entry intact.
+                        if name.startswith(SELF_TAG):
+                            kept.append(n)
+                            continue
                         drop_names.append(name)
                         dropped_keys.add(key)
                         continue
                     kept.append(n)
-                skipped_replaced = len(dead_keys - dropped_keys)
+                skipped_replaced = len(dead_keys - dropped_keys - protected_keys)
                 if drop_names:
                     save_disabled_nodes(set(drop_names), self.disabled_file)
                     newly_dead = drop_names
@@ -2453,7 +2507,7 @@ class SubscriptionEngine:
         else:
             kept = [
                 n for n in existing
-                if str(n.get('name') or '').strip() not in already
+                if not is_denylisted(str(n.get('name') or '').strip(), already)
                 and _node_endpoint_key(n) not in dead_keys
             ]
 
@@ -2464,6 +2518,7 @@ class SubscriptionEngine:
             'alive_count': len(alive),
             'dead_count': len(newly_dead),
             'newly_dead': newly_dead,
+            'dead_self_built': dead_self_built,  # reported, never dropped
             'alive': [{'name': str(n.get('name')), 'delay': None} for n in alive[:20]],
             'applied_filter': apply_filter,
             'targets_updated': [str(self.local_nodes_file)] if apply_filter else [],

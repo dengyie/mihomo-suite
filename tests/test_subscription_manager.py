@@ -2243,3 +2243,114 @@ def test_publish_skips_kernel_when_content_unchanged(temp_clash_root, monkeypatc
     assert len(calls) == 1
 
 
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-03: self-built naming (tag + region flag) / denylist consistency
+# ---------------------------------------------------------------------------
+
+SELF_TAG = sm.SELF_TAG
+TAGGED_HK = "[自建] 🇭🇰TUIC-Azure"
+TAGGED_US = "[自建] 🇺🇸TUIC-googlevps"
+
+
+def test_strip_self_tag_only_strips_self_built_flags():
+    assert sm.strip_self_tag(TAGGED_HK) == "TUIC-Azure"
+    assert sm.strip_self_tag("[自建] TUIC-Azure") == "TUIC-Azure"
+    assert sm.strip_self_tag("TUIC-Azure") == "TUIC-Azure"
+    # airport names keep their own leading flag
+    assert sm.strip_self_tag("🇸🇬【亚洲】新加坡03丨直连") == "🇸🇬【亚洲】新加坡03丨直连"
+
+
+def test_is_denylisted_accepts_every_spelling():
+    assert sm.is_denylisted(TAGGED_HK, {"TUIC-Azure"})
+    assert sm.is_denylisted(TAGGED_HK, {TAGGED_HK})
+    assert sm.is_denylisted(TAGGED_HK, {"[自建] TUIC-Azure"})
+    assert not sm.is_denylisted(TAGGED_HK, {"AnyTLS-Azure"})
+    assert not sm.is_denylisted(None, {"TUIC-Azure"})
+
+
+def test_save_disabled_nodes_records_self_built_bare_name(temp_clash_root):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    sm.save_disabled_nodes({TAGGED_US}, engine.disabled_file)
+
+    saved = engine.disabled_file.read_text(encoding="utf-8")
+    assert "TUIC-googlevps" in saved
+    assert TAGGED_US not in saved
+    # and it round-trips: the tagged node is recognised as denylisted
+    assert sm.is_denylisted(TAGGED_US, sm.load_disabled_nodes(engine.disabled_file))
+
+
+def test_reconcile_prunes_denylisted_tagged_proxy(temp_clash_root):
+    """A bare denylist entry must also prune the flagged, tagged live node."""
+    engine = SubscriptionEngine(root=temp_clash_root)
+    cfg = temp_clash_root / "config.yaml"
+    cfg.write_text(yaml.safe_dump({
+        "proxies": [
+            {"name": TAGGED_HK, "server": "104.208.65.233", "port": 47931, "type": "tuic"},
+            {"name": "🇸🇬【亚洲】新加坡03丨直连", "server": "1.2.3.4", "port": 443, "type": "trojan"},
+        ],
+        "proxy-groups": [
+            {"name": sm.SUB_GROUP_NAME, "type": "select", "proxies": ["DIRECT"]},
+            {"name": "PROXY", "type": "select", "proxies": [TAGGED_HK, "🇸🇬【亚洲】新加坡03丨直连", "DIRECT"]},
+        ],
+        "rules": ["MATCH,PROXY"],
+    }, allow_unicode=True), encoding="utf-8")
+
+    changed = sm.reconcile_target_config(cfg, None, disabled_nodes={"TUIC-Azure"})
+    assert changed is True
+    out = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+    names = [p["name"] for p in out["proxies"]]
+    assert names == ["🇸🇬【亚洲】新加坡03丨直连"]
+    assert TAGGED_HK not in out["proxy-groups"][1]["proxies"]
+
+
+def test_reconcile_does_not_strip_flag_from_airport_names(temp_clash_root):
+    """An airport node flagged 🇸🇬 must not be pruned by a bare denylist entry."""
+    engine = SubscriptionEngine(root=temp_clash_root)
+    cfg = temp_clash_root / "config.yaml"
+    airport = "🇸🇬【亚洲】新加坡03丨直连"
+    cfg.write_text(yaml.safe_dump({
+        "proxies": [{"name": airport, "server": "1.2.3.4", "port": 443, "type": "trojan"}],
+        "proxy-groups": [
+            {"name": sm.SUB_GROUP_NAME, "type": "select", "proxies": ["DIRECT"]},
+            {"name": "PROXY", "type": "select", "proxies": [airport, "DIRECT"]},
+        ],
+        "rules": ["MATCH,PROXY"],
+    }, allow_unicode=True), encoding="utf-8")
+
+    sm.reconcile_target_config(cfg, None, disabled_nodes={"【亚洲】新加坡03丨直连"})
+    out = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+    assert airport in [p["name"] for p in out["proxies"]]
+
+
+def test_prune_local_node_file_never_drops_self_built(temp_clash_root, monkeypatch):
+    """A dead self-built node is reported, but stays in the pool source of truth."""
+    engine = SubscriptionEngine(root=temp_clash_root)
+    pool_dir = temp_clash_root / "airports"
+    pool_dir.mkdir(parents=True, exist_ok=True)
+    airport = "🇸🇬【亚洲】新加坡03丨直连"
+    pool_dir.joinpath("local-nodes.yaml").write_text(yaml.safe_dump({
+        "proxies": [
+            {"name": TAGGED_HK, "server": "104.208.65.233", "port": 47931, "type": "tuic"},
+            {"name": airport, "server": "1.2.3.4", "port": 443, "type": "trojan"},
+        ],
+        "groups": {"vps-import": [TAGGED_HK, airport]},
+    }, allow_unicode=True), encoding="utf-8")
+
+    # both endpoints are "dead"
+    monkeypatch.setattr(
+        sm, "probe_nodes",
+        lambda nodes, **kw: ([], [dict(n) for n in nodes]),
+    )
+
+    result = engine.prune_local_node_file()
+    assert result["success"] is True
+    # the self-built node is reported, not dropped
+    assert TAGGED_HK in result["dead_self_built"]
+    assert TAGGED_HK not in result["newly_dead"]
+    kept = [p["name"] for p in sm.load_local_nodes_file(pool_dir / "local-nodes.yaml")]
+    assert TAGGED_HK in kept          # source of truth intact
+    assert airport not in kept        # airport node still pruned
+    disabled = sm.load_disabled_nodes(engine.disabled_file)
+    assert TAGGED_HK not in disabled
