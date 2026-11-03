@@ -101,12 +101,18 @@ run_logged() {
 say "=== clash-keeper 启动 interval=${INTERVAL}s ==="
 
 while true; do
-  if ! pgrep -x mihomo >/dev/null 2>&1; then
+  # 精准检测主 Mihomo (7897/9090) 是否存活，不能用 pgrep -x 误判
+  if ! netstat -ltn 2>/dev/null | grep -q ':7897 '; then
     say "mihomo 不在, 拉起"
     run_logged start-clash bash "$START" || true
   elif [ -x "$GUARD" ]; then
     # 单次自检: listener.proxy 悬空 / 桥不通 时换个活的美国节点并 reload
     run_logged guard "$GUARD" || true
+  fi
+
+  # PROXY Selector 自检: pin 死节点连续 2 轮失败自动切回 AUTO (2026-10-22 EOF 事故根修)
+  if [ -x "$DIR/proxy-selector-guard.py" ]; then
+    run_logged proxy-selector "$DIR/proxy-selector-guard.py" || true
   fi
 
   if [ -x "$DIR/apply-local-import.py" ]; then

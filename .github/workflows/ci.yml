@@ -41,9 +41,23 @@ jobs:
       - name: Syntax & Lint check Python files
         run: |
           echo "Checking Python syntax and basic errors..."
-          pyflakes clash/rules-reconciler.py clash/apply-local-import.py clash/subscription-manager.py clash/hutao-bridge-guard.py zashboard/gateway.py tests/*.py
-          python3 -m py_compile clash/rules-reconciler.py clash/apply-local-import.py clash/subscription-manager.py clash/hutao-bridge-guard.py zashboard/gateway.py tests/*.py
+          # Glob the whole tree rather than a hardcoded list: a hardcoded list
+          # silently stops gating any file added later (clash_lock.py and the
+          # probe/reload helpers were ungated for exactly that reason).
+          pyfiles=$(find clash zashboard tests -name '*.py' -not -path '*/__pycache__/*' | sort)
+          echo "$pyfiles"
+          pyflakes $pyfiles
+          python3 -m py_compile $pyfiles
           echo "All Python scripts passed syntax validation."
+
+      - name: Syntax check shell scripts
+        run: |
+          echo "Checking shell script syntax..."
+          for f in clash/*.sh scripts/*.sh; do
+            echo "  bash -n $f"
+            bash -n "$f"
+          done
+          echo "All shell scripts passed syntax validation."
 
       - name: Run Python unit tests
         run: |

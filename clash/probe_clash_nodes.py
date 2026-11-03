@@ -201,9 +201,6 @@ def rewrite_config_groups(
 
     text = cfg_path.read_text(encoding="utf-8")
     data = yaml.safe_load(text)
-    healthy_set = set(healthy)
-    # preserve non-leaf refs
-    extras_ok = {"DIRECT", "REJECT", "♻️Grok优选", "♻️ 自动选择", "PROXY"}
 
     ordered = list(preferred_first) + [n for n in healthy if n not in preferred_first]
 
@@ -213,7 +210,6 @@ def rewrite_config_groups(
         if name not in REGISTER_GROUPS:
             continue
         old = list(g.get("proxies") or [])
-        keep_meta = [x for x in old if x in extras_ok or x not in healthy_set and x in extras_ok]
         # rebuild: preferred healthy + remaining healthy + DIRECT for select
         if g.get("type") == "url-test":
             g["proxies"] = ordered[:] if ordered else old
