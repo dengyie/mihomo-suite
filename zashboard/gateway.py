@@ -32,6 +32,11 @@ CLASH_ROOT = Path(CLASH_ROOT_ENV).resolve() if CLASH_ROOT_ENV else Path('/person
 RECONCILER_PATH = CLASH_ROOT / 'rules-reconciler.py'
 SUBSCRIPTION_MANAGER_PATH = CLASH_ROOT / 'subscription-manager.py'
 
+# The gateway runs on Python 3.10, whose mimetypes table has no .webp entry, so
+# the globe textures were served as application/octet-stream. Register it (and
+# keep any future image format here) before mimetypes.guess_type is first used.
+mimetypes.add_type('image/webp', '.webp')
+
 # Static file byte cache. /personal is NFS, so every uncached request costs a
 # full file read round-trip; validate by (mtime_ns, size) so file swaps are
 # always picked up. index.html is never rewritten with the panel password.

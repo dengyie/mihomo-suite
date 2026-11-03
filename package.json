@@ -10,14 +10,15 @@
     "url": "https://github.com/dengyie/mihomo-suite.git"
   },
   "scripts": {
-    "test": "npm run check:ui && node tests/test_ui_bundle.mjs && python3 -m pytest tests/",
+    "test": "npm run check:ui && npm run check:assets && node tests/test_ui_bundle.mjs && python3 -m pytest tests/",
     "start": "python3 zashboard/gateway.py",
     "reconcile": "python3 clash/rules-reconciler.py --reconcile",
     "dry-run": "python3 clash/rules-reconciler.py --dry-run",
     "build:ui": "node scripts/build-ui.mjs",
     "check:ui": "node --check zashboard/src/user-rules-ui.js && node --check zashboard/dist/assets/user-rules-ui.js",
     "check:api": "python3 -m unittest discover -s tests",
-    "check:configs": "bash scripts/check-configs.sh"
+    "check:configs": "bash scripts/check-configs.sh",
+    "check:assets": "node scripts/check-dist-assets.mjs"
   },
   "keywords": [
     "mihomo",

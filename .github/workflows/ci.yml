@@ -55,6 +55,8 @@ jobs:
           echo "Validating package.json and webmanifest..."
           node -e "JSON.parse(fs.readFileSync('package.json'))"
           node -e "JSON.parse(fs.readFileSync('zashboard/dist/manifest.webmanifest'))"
+          echo "Validating dist asset containers (truncation guard)..."
+          node scripts/check-dist-assets.mjs
           echo "JSON files are valid."
 
       - name: Validate & rebuild UI extension (src -> dist)

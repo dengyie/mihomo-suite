@@ -591,6 +591,21 @@ class GatewayEndpointsTests(unittest.TestCase):
         gw_src = (REPO_ROOT / 'zashboard' / 'gateway.py').read_text()
         self.assertNotIn("data.replace(b'__PANEL_PASSWORD__'", gw_src)
 
+    def test_static_webp_is_served_as_image_webp(self):
+        """Python 3.10's mimetypes has no .webp; the textures must not go out as
+        application/octet-stream (gateway registers the type explicitly)."""
+        assets = self.test_dir / 'dist' / 'assets'
+        assets.mkdir(parents=True, exist_ok=True)
+        payload = b'RIFF' + (16).to_bytes(4, 'little') + b'WEBP' + b'VP8 ' + (8).to_bytes(4, 'little') + b'0' * 8
+        (assets / 'tex.webp').write_bytes(payload)
+
+        harness = _FakeRequestHarness(self.gw, 'GET', '/assets/tex.webp')
+        self.gw.Handler._static(harness.handler)
+
+        self.assertEqual(harness.response_status, 200)
+        self.assertEqual(harness.response_headers.get('Content-Type'), 'image/webp')
+        self.assertEqual(harness.handler.wfile.getvalue(), payload)
+
 
 if __name__ == '__main__':
     unittest.main()
