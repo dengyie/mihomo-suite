@@ -13,7 +13,6 @@ from __future__ import annotations
 import argparse
 import base64
 import errno
-import fcntl
 import hashlib
 import http.client
 import ipaddress
@@ -34,6 +33,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import yaml
+
+try:
+    from clash_lock import ClashConfigLock
+except ImportError:  # module loaded by path (tests / gateway) without its dir on sys.path
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from clash_lock import ClashConfigLock
 
 # ROOT configuration supporting CLASH_ROOT environment variable
 CLASH_ROOT_ENV = os.environ.get('CLASH_ROOT')
@@ -935,6 +940,23 @@ def reconcile_target_config(
     active_proxies: Optional[List[Dict[str, Any]]] = None,
     disabled_nodes: Optional[Set[str]] = None,
 ) -> bool:
+    """Read-modify-write one live config under the shared config lock.
+
+    Every live-config writer goes through here or through the keeper's
+    ``apply-local-import``, which takes the same lock file, so concurrent RMW
+    can no longer clobber the other writer's update. Reentrant, so admin
+    actions that already hold the lock (add/update/delete subscription) nest
+    without self-deadlocking.
+    """
+    with ClashConfigLock():
+        return _reconcile_target_config_impl(target_path, active_proxies, disabled_nodes)
+
+
+def _reconcile_target_config_impl(
+    target_path: Path,
+    active_proxies: Optional[List[Dict[str, Any]]] = None,
+    disabled_nodes: Optional[Set[str]] = None,
+) -> bool:
     """Safely inject active subscription proxies into target config and maintain SUB_GROUP_NAME.
     
     If active_proxies is None, only filters out disabled_nodes without resetting subscription proxies.
@@ -1049,35 +1071,6 @@ def get_paths(root: Optional[Path] = None) -> Tuple[Path, Path, Path, Path, Path
     lock = base / 'subscriptions/.subscription.lock'
     disabled = base / 'airports/disabled-nodes.txt'
     return base, meta, raw_dir, merged, lock, disabled
-
-
-class SubscriptionLock:
-    """Context manager for fcntl file locking."""
-
-    def __init__(self, lock_file: Optional[Path] = None):
-        if lock_file is None:
-            _, _, _, _, self.lock_path, _ = get_paths()
-        else:
-            self.lock_path = lock_file
-        self.lock_fd = None
-
-    def __enter__(self):
-        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
-        self.lock_fd = open(self.lock_path, 'w')
-        fcntl.flock(self.lock_fd, fcntl.LOCK_EX)
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.lock_fd:
-            try:
-                fcntl.flock(self.lock_fd, fcntl.LOCK_UN)
-            except Exception:
-                pass
-            try:
-                self.lock_fd.close()
-            except Exception:
-                pass
-            self.lock_fd = None
 
 
 def decode_base64_safely(data: Union[str, bytes]) -> str:
@@ -1904,7 +1897,7 @@ class SubscriptionEngine:
                 fetch_error = f"Fetch failed: {e}"
 
         pending_inject: Optional[List[Dict[str, Any]]] = None
-        with SubscriptionLock(self.lock_file):
+        with ClashConfigLock(self.lock_file):
             data = self.load_meta()
             subs = data.get('subscriptions', [])
 
@@ -1967,7 +1960,7 @@ class SubscriptionEngine:
                 probe=probe,
                 target_group=target_group,
             )
-            with SubscriptionLock(self.lock_file):
+            with ClashConfigLock(self.lock_file):
                 data = self.load_meta()
                 for sub in data.get('subscriptions', []):
                     if sub.get('id') == sub_id:
@@ -2009,7 +2002,7 @@ class SubscriptionEngine:
         ``airports/local-nodes.yaml``. Fetch failure is ``success: False``.
         """
         fetch_url_value: Optional[str] = None
-        with SubscriptionLock(self.lock_file):
+        with ClashConfigLock(self.lock_file):
             data = self.load_meta()
             subs = data.get('subscriptions', [])
             sub = next((s for s in subs if s.get('id') == sub_id), None)
@@ -2061,7 +2054,7 @@ class SubscriptionEngine:
                     fetch_error = f"Fetch failed: {e}"
 
         pending_inject: Optional[List[Dict[str, Any]]] = None
-        with SubscriptionLock(self.lock_file):
+        with ClashConfigLock(self.lock_file):
             data = self.load_meta()
             sub = next((s for s in data.get('subscriptions', []) if s.get('id') == sub_id), None)
             if not sub:
@@ -2105,7 +2098,7 @@ class SubscriptionEngine:
                 probe=probe,
                 target_group=target_group,
             )
-            with SubscriptionLock(self.lock_file):
+            with ClashConfigLock(self.lock_file):
                 data = self.load_meta()
                 for item in data.get('subscriptions', []):
                     if item.get('id') == sub_id:
@@ -2165,7 +2158,7 @@ class SubscriptionEngine:
         ``config.yaml`` on the next apply. Existing denylist entries are left
         untouched.
         """
-        with SubscriptionLock(self.lock_file):
+        with ClashConfigLock(self.lock_file):
             data = self.load_meta()
             subs = data.get('subscriptions', [])
             idx = next((i for i, s in enumerate(subs) if s.get('id') == sub_id), -1)
@@ -2312,7 +2305,7 @@ class SubscriptionEngine:
         # 4. Apply filter if requested
         targets_updated = []
         if apply_filter and newly_dead:
-            with SubscriptionLock(self.lock_file):
+            with ClashConfigLock(self.lock_file):
                 save_disabled_nodes(set(newly_dead), self.disabled_file)
                 all_disabled = load_disabled_nodes(self.disabled_file)
 
@@ -2380,7 +2373,7 @@ class SubscriptionEngine:
         must not permanently blacklist a brand-new name). Already-denylisted
         names stay out.
         """
-        with SubscriptionLock(self.lock_file):
+        with ClashConfigLock(self.lock_file):
             disabled = load_disabled_nodes(self.disabled_file)
             candidates = [
                 n for n in nodes
@@ -2394,7 +2387,7 @@ class SubscriptionEngine:
         else:
             alive, dead = candidates, []
 
-        with SubscriptionLock(self.lock_file):
+        with ClashConfigLock(self.lock_file):
             disabled = load_disabled_nodes(self.disabled_file)
             existing_doc = load_local_nodes_document(self.local_nodes_file)
             existing = existing_doc['proxies']
@@ -2448,7 +2441,7 @@ class SubscriptionEngine:
         UDP-only node types are kept. Probe I/O is outside the lock. Destinations
         refused by the SSRF filter stay in the file (not treated as dead).
         """
-        with SubscriptionLock(self.lock_file):
+        with ClashConfigLock(self.lock_file):
             existing = load_local_nodes_file(self.local_nodes_file)
             already = load_disabled_nodes(self.disabled_file)
             to_test = [
@@ -2476,7 +2469,7 @@ class SubscriptionEngine:
         protected_keys = {key for key in dead_keys if key[0] and key[0].startswith(SELF_TAG)}
         skipped_replaced = 0
         if apply_filter:
-            with SubscriptionLock(self.lock_file):
+            with ClashConfigLock(self.lock_file):
                 already = load_disabled_nodes(self.disabled_file)
                 current = load_local_nodes_file(self.local_nodes_file)
                 kept: List[Dict[str, Any]] = []
@@ -2668,19 +2661,26 @@ class SubscriptionEngine:
         seen: Set[str] = set()
 
         merged_path = self.merged_output_file
-        if merged_path.exists():
-            try:
-                merged = fast_yaml_load(merged_path.read_text(encoding='utf-8', errors='ignore')) or {}
-                for node in (merged.get('proxies') or []) if isinstance(merged, dict) else []:
-                    if not isinstance(node, dict):
-                        continue
-                    name = str(node.get('name') or '').strip()
-                    if not name or name in disabled or name in seen:
-                        continue
-                    seen.add(name)
-                    proxies.append(node)
-            except Exception:
-                pass
+        # reconcile_merged() above rewrites this file unconditionally, so a
+        # missing/unparseable file is an anomaly, not an empty subscription set.
+        # Silently continuing would publish a client config with no airport
+        # nodes at all (it still passes structure validation).
+        if not merged_path.exists():
+            raise ClientExportInvalid([f'merged: {merged_path.name} missing after reconcile'])
+        try:
+            merged = fast_yaml_load(merged_path.read_text(encoding='utf-8', errors='ignore')) or {}
+        except Exception as e:
+            raise ClientExportInvalid([f'merged-parse: {merged_path.name}: {e}']) from e
+        if not isinstance(merged, dict):
+            raise ClientExportInvalid([f'merged: {merged_path.name} is not a mapping'])
+        for node in merged.get('proxies') or []:
+            if not isinstance(node, dict):
+                continue
+            name = str(node.get('name') or '').strip()
+            if not name or name in disabled or name in seen:
+                continue
+            seen.add(name)
+            proxies.append(node)
 
         for node in self._load_local_nodes():
             name = str(node.get('name') or '').strip()

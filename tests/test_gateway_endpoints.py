@@ -95,6 +95,10 @@ class GatewayEndpointsTests(unittest.TestCase):
         (self.clash_dir / 'rules-reconciler.py').write_text(
             (REPO_ROOT / 'clash' / 'rules-reconciler.py').read_text()
         )
+        # sibling dependency of subscription-manager.py (shared config lock)
+        (self.clash_dir / 'clash_lock.py').write_text(
+            (REPO_ROOT / 'clash' / 'clash_lock.py').read_text()
+        )
 
         # Create basic config.yaml in clash_dir
         sample_config = {

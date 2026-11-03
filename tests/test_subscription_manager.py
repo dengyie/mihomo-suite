@@ -20,7 +20,7 @@ _spec.loader.exec_module(sm)
 
 DEFAULT_EXCLUDE_FILTER = sm.DEFAULT_EXCLUDE_FILTER
 SubscriptionEngine = sm.SubscriptionEngine
-SubscriptionLock = sm.SubscriptionLock
+ClashConfigLock = sm.ClashConfigLock
 apply_node_name_prefix = sm.apply_node_name_prefix
 decode_base64_safely = sm.decode_base64_safely
 filter_nodes = sm.filter_nodes
@@ -465,10 +465,45 @@ trojan://pass2@node2.com:443#Hong Kong
     assert names == ["[Airport] Hong Kong", "[Airport] Hong Kong (1)"]
 
 
-def test_subscription_lock(temp_clash_root):
+def test_config_lock_creates_and_reenters(temp_clash_root):
     lock_file = temp_clash_root / "subscriptions/.test.lock"
-    with SubscriptionLock(lock_file):
+    with ClashConfigLock(lock_file):
         assert lock_file.exists()
+        with ClashConfigLock(lock_file):  # nested acquisition must not self-deadlock
+            assert lock_file.exists()
+
+
+def test_config_lock_excludes_foreign_holder(temp_clash_root):
+    """A second fd from outside the registry (i.e. another process) must wait."""
+    import fcntl
+    import threading
+    import time
+
+    lock_file = temp_clash_root / "subscriptions/.race.lock"
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    holder = open(lock_file, "a+")
+    fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+
+    acquired = []
+    try:
+        def contender():
+            with ClashConfigLock(lock_file):
+                acquired.append(time.monotonic())
+
+        t = threading.Thread(target=contender, daemon=True)
+        started = time.monotonic()
+        t.start()
+        time.sleep(0.3)
+        assert not acquired, "lock acquired while a foreign fd still held it"
+        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+        holder.close()
+        holder = None
+        t.join(timeout=5)
+        assert acquired and acquired[0] >= started
+    finally:
+        if holder is not None:
+            fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+            holder.close()
 
 
 def test_cli_interface(temp_clash_root, monkeypatch, capsys):
@@ -2091,6 +2126,67 @@ def test_publish_without_last_good_raises(temp_clash_root, monkeypatch):
     assert not (temp_clash_root / "airports" / "mango-clash.yaml").exists()
 
 
+def test_publish_merged_missing_does_not_drop_subscription_nodes(temp_clash_root, monkeypatch):
+    """A missing merged file is an anomaly and must serve last-good, never a
+    node-poor export that would silently pass validation and overwrite it."""
+    engine = SubscriptionEngine(root=temp_clash_root)
+    (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
+    (temp_clash_root / "airports" / "local-nodes.yaml").write_text(
+        yaml.safe_dump({"proxies": [
+            {"name": "Keep-Direct", "type": "ss", "server": "1.2.3.4", "port": 8388,
+             "cipher": "aes-128-gcm", "password": "x"}]}),
+        encoding="utf-8",
+    )
+    first = engine.publish_client_clash_config(fetch_remote=False)
+    assert first["published"] is True
+    last_path = temp_clash_root / "airports" / "mango-clash.yaml"
+    before = last_path.read_text(encoding="utf-8")
+    digest = first["sha256"]
+
+    def noop_reconcile(**kwargs):
+        return {}
+
+    monkeypatch.setattr(engine, "reconcile_merged", noop_reconcile)
+    monkeypatch.setattr(engine, "_client_export_inputs_fingerprint", lambda: "force-rerender")
+    merged_path = temp_clash_root / "airports" / "airport-merged-sub.yaml"
+    assert merged_path.exists()
+    merged_path.unlink()
+    second = engine.publish_client_clash_config(fetch_remote=False)
+    assert second["published"] is False
+    assert second["served_last_good"] is True
+    assert second["sha256"] == digest
+    assert last_path.read_text(encoding="utf-8") == before
+
+
+def test_publish_merged_corrupt_does_not_drop_subscription_nodes(temp_clash_root, monkeypatch):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
+    (temp_clash_root / "airports" / "local-nodes.yaml").write_text(
+        yaml.safe_dump({"proxies": [
+            {"name": "Keep-Direct", "type": "ss", "server": "1.2.3.4", "port": 8388,
+             "cipher": "aes-128-gcm", "password": "x"}]}),
+        encoding="utf-8",
+    )
+    first = engine.publish_client_clash_config(fetch_remote=False)
+    assert first["published"] is True
+    last_path = temp_clash_root / "airports" / "mango-clash.yaml"
+    before = last_path.read_text(encoding="utf-8")
+    digest = first["sha256"]
+
+    def noop_reconcile(**kwargs):
+        return {}
+
+    monkeypatch.setattr(engine, "reconcile_merged", noop_reconcile)
+    monkeypatch.setattr(engine, "_client_export_inputs_fingerprint", lambda: "force-rerender")
+    merged_path = temp_clash_root / "airports" / "airport-merged-sub.yaml"
+    merged_path.write_text("proxies: [not: [ valid", encoding="utf-8")
+    second = engine.publish_client_clash_config(fetch_remote=False)
+    assert second["published"] is False
+    assert second["served_last_good"] is True
+    assert second["sha256"] == digest
+    assert last_path.read_text(encoding="utf-8") == before
+
+
 def test_validate_rejects_proxy_name_colliding_with_group():
     text = _minimal_client_yaml(
         extra_proxies=[
@@ -2283,7 +2379,6 @@ def test_save_disabled_nodes_records_self_built_bare_name(temp_clash_root):
 
 def test_reconcile_prunes_denylisted_tagged_proxy(temp_clash_root):
     """A bare denylist entry must also prune the flagged, tagged live node."""
-    engine = SubscriptionEngine(root=temp_clash_root)
     cfg = temp_clash_root / "config.yaml"
     cfg.write_text(yaml.safe_dump({
         "proxies": [
@@ -2307,7 +2402,6 @@ def test_reconcile_prunes_denylisted_tagged_proxy(temp_clash_root):
 
 def test_reconcile_does_not_strip_flag_from_airport_names(temp_clash_root):
     """An airport node flagged 🇸🇬 must not be pruned by a bare denylist entry."""
-    engine = SubscriptionEngine(root=temp_clash_root)
     cfg = temp_clash_root / "config.yaml"
     airport = "🇸🇬【亚洲】新加坡03丨直连"
     cfg.write_text(yaml.safe_dump({

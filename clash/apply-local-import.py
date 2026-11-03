@@ -15,6 +15,8 @@ the subscription-orphan sweep below.
 """
 from __future__ import annotations
 
+import copy
+import json
 import os
 import re
 import shutil
@@ -24,6 +26,12 @@ from datetime import datetime
 from pathlib import Path
 
 import yaml
+
+try:
+    from clash_lock import ClashConfigLock
+except ImportError:  # script loaded by path (tests) without its dir on sys.path
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from clash_lock import ClashConfigLock
 
 ROOT = Path(os.environ.get('CLASH_ROOT', '/personal/clash')).resolve()
 GROUP = '🌐 本机导入'
@@ -106,10 +114,14 @@ def is_disabled(name: str, disabled: set[str]) -> bool:
 
 
 def same_upstream(a: dict, b: dict) -> bool:
-    """True when two proxies dial the same endpoint (server/port/type)."""
+    """True when two proxies dial the same endpoint (server/port/type).
+
+    Port is compared as text: a quoted ``port: "443"`` in one file and an int
+    ``443`` in the other are the same endpoint.
+    """
     return (
         str(a.get('server')) == str(b.get('server'))
-        and a.get('port') == b.get('port')
+        and str(a.get('port')) == str(b.get('port'))
         and a.get('type') == b.get('type')
     )
 
@@ -136,6 +148,14 @@ def _rename_targets(groups, listeners, rules, mapping: dict[str, str]) -> int:
 
     Only exact matches of a bare name are rewritten; already-tagged or
     unrelated names pass through untouched. Returns number of edits.
+
+    Contract: a rule destination is only recognised in the **last** comma
+    segment. Clash puts payload modifiers (``no-resolve``, ``force-udp``) after
+    the destination, so a renamed node followed by a modifier would not be
+    rewritten; the pool-imported rules only ever name a node last
+    (``IN-USER,zen_key_N,<node>``), and the ``no-resolve`` rules target groups
+    or ``DIRECT``, so this is sufficient — extend it deliberately if a new rule
+    shape starts naming self-built nodes.
     """
     edits = 0
     for group in groups or []:
@@ -258,6 +278,41 @@ def rename_self_built(data: dict, imported: list[dict]) -> tuple[int, int]:
     return nodes, refs
 
 
+def refresh_self_built_fields(data: dict, imported: list[dict]) -> int:
+    """Overwrite live self-built nodes with the pool's authoritative fields.
+
+    ``build_data`` historically only ever *added* proxies, so a port or
+    credential change in the pool never reached the live configs: the keeper kept
+    printing ``unchanged`` while clients (rendered from the pool) dialled the new
+    endpoint and the servers dialled the old one. Every exactly-named ``[自建]``
+    node is replaced by its pool copy; live-only legacy nodes
+    (``LEGACY_SELF_BUILT``) have no pool entry and are left untouched.
+
+    Returns the number of nodes whose fields were refreshed.
+    """
+    pool = {
+        p['name']: p
+        for p in imported or []
+        if isinstance(p, dict) and isinstance(p.get('name'), str)
+        and p['name'].startswith(SELF_TAG)
+    }
+    if not pool:
+        return 0
+    proxies = data.get('proxies') or []
+    refreshed = 0
+    for index, proxy in enumerate(proxies):
+        if not isinstance(proxy, dict):
+            continue
+        name = proxy.get('name')
+        if not isinstance(name, str) or name not in pool:
+            continue
+        fresh = pool[name]
+        if fresh != proxy:
+            proxies[index] = copy.deepcopy(fresh)
+            refreshed += 1
+    return refreshed
+
+
 def resolve_airport(root: Path) -> Path:
     env = os.environ.get('APPLY_LOCAL_IMPORT_FILE', '').strip()
     if env:
@@ -347,9 +402,14 @@ def build_data(
     imported: list[dict],
     disabled: set[str],
     pool_proxies: list[dict] | None = None,
-) -> tuple[dict, int, int]:
+) -> tuple[dict, int, int, int]:
     data = yaml.safe_load(target.read_text()) or {}
     rename_self_built(data, pool_proxies if pool_proxies is not None else imported)
+    # After the rename pass every live self-built node carries its canonical
+    # pool name, so the pool can now hand over the authoritative fields.
+    refreshed = refresh_self_built_fields(
+        data, pool_proxies if pool_proxies is not None else imported
+    )
     proxies = data.get('proxies') or []
     existing = {
         proxy.get('name')
@@ -448,7 +508,7 @@ def build_data(
             if not cleaned:
                 cleaned = ['PROXY'] if 'PROXY' in valid_references and g_name != 'PROXY' else ['DIRECT']
             item['proxies'] = cleaned
-    return data, len(added), removed
+    return data, len(added), removed, refreshed
 
 
 def reload_live() -> int:
@@ -477,7 +537,7 @@ def reload_live() -> int:
     secret = secret_file.read_text().strip()
     req = urllib.request.Request(
         'http://127.0.0.1:9090/configs?force=true',
-        data=('{"path":"%s"}' % (ROOT / 'config.yaml')).encode('utf-8'),
+        data=json.dumps({'path': str(ROOT / 'config.yaml')}).encode('utf-8'),
         method='PUT',
         headers={
             'Authorization': f'Bearer {secret}',
@@ -516,19 +576,27 @@ def main() -> None:
     if not targets:
         print('no clash config targets; skip')
         return
-    for target in targets:
-        data, added, removed = build_data(target, imported, disabled, pool_proxies)
-        rendered = yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=120)
-        current = target.read_text()
-        if rendered == current:
-            print(f'{target.name}: unchanged added=0 removed=0 members={len(names)}')
-            continue
-        backup = Path(str(target) + f'.pre-local-persist-{timestamp}')
-        shutil.copy2(target, backup)
-        target.write_text(rendered)
-        print(f'{target.name}: changed added={added} removed={removed} members={len(names)}')
-        if target.name == 'config.yaml':
-            changed_live = True
+    # Same lock the gateway's reconcile_target_config takes: one writer at a
+    # time across processes, so neither side's read-modify-write clobbers the
+    # other's update.
+    with ClashConfigLock():
+        for target in targets:
+            data, added, removed, refreshed = build_data(target, imported, disabled, pool_proxies)
+            rendered = yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=120)
+            current = target.read_text()
+            if rendered == current:
+                print(f'{target.name}: unchanged added=0 removed=0 refreshed=0 members={len(names)}')
+                continue
+            backup = Path(str(target) + f'.pre-local-persist-{timestamp}')
+            try:
+                shutil.copy2(target, backup)
+            except OSError as e:
+                print(f'{target.name}: backup failed ({e}); refusing to write', file=sys.stderr)
+                continue
+            target.write_text(rendered)
+            print(f'{target.name}: changed added={added} removed={removed} refreshed={refreshed} members={len(names)}')
+            if target.name == 'config.yaml':
+                changed_live = True
     if changed_live:
         if not (ROOT / '.controller-secret').exists():
             print('live_reload skipped: missing .controller-secret')

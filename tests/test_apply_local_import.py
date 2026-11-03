@@ -51,7 +51,7 @@ def pool():
     return [
         _proxy(HK_TUIC, "104.208.65.233", 47931, "tuic"),
         _proxy(IN_INDIA_FLAGGED, "20.198.2.112", 56667),
-        _proxy("[自建] 🇯🇵VLESS-AWS-Tokyo-Reality", "52.192.36.79", 56667),
+        _proxy("[自建] 🇯🇵VLESS-AWS-Tokyo-Reality", "52.192.36.79", 443),
         _proxy(IN_MESH, "127.0.0.1", 10882, "socks5"),
     ]
 
@@ -189,7 +189,7 @@ def test_build_data_exempts_self_built_from_orphan_pruning(tmp_path, pool):
         "rules": ["MATCH,PROXY"],
     }, allow_unicode=True), encoding="utf-8")
 
-    data, _, _ = ali.build_data(target, pool, set(), pool_proxies=pool)
+    data, _, _, _ = ali.build_data(target, pool, set(), pool_proxies=pool)
     names = _names(data)
     assert "[机场] Stale-Node" not in names
     assert "[自建] 🇺🇸Muse-VM-Reality" in names
@@ -205,6 +205,87 @@ def test_build_data_drops_denylisted_pool_node(tmp_path, pool):
     }, allow_unicode=True), encoding="utf-8")
 
     # denylisted under the bare name -> the flagged pool node must not be added
-    data, _, _ = ali.build_data(target, pool, {"TUIC-Azure"}, pool_proxies=pool)
+    data, _, _, _ = ali.build_data(target, pool, {"TUIC-Azure"}, pool_proxies=pool)
     assert HK_TUIC not in _names(data)
     assert IN_INDIA_FLAGGED in _names(data)
+
+
+def test_build_data_refreshes_changed_self_built_fields(tmp_path, pool):
+    """A pool port/credential change must reach an existing live node (P1)."""
+    tokyo = "[自建] 🇯🇵VLESS-AWS-Tokyo-Reality"
+    target = tmp_path / "config.yaml"
+    target.write_text(yaml.safe_dump({
+        "proxies": [_proxy(tokyo, "52.192.36.79", 56667)],
+        "proxy-groups": [{"name": "🌐 本机导入", "type": "select", "proxies": [tokyo]}],
+        "rules": ["MATCH,PROXY"],
+    }, allow_unicode=True), encoding="utf-8")
+
+    data, added, removed, refreshed = ali.build_data(target, pool, set(), pool_proxies=pool)
+    node = next(p for p in data["proxies"] if p["name"] == tokyo)
+    assert node["port"] == 443
+    assert refreshed == 1
+    assert removed == 0
+    assert sum(1 for p in data["proxies"] if p["name"] == tokyo) == 1
+
+
+def test_build_data_field_refresh_is_idempotent(tmp_path, pool):
+    tokyo = "[自建] 🇯🇵VLESS-AWS-Tokyo-Reality"
+    target = tmp_path / "config.yaml"
+    target.write_text(yaml.safe_dump({
+        "proxies": [_proxy(tokyo, "52.192.36.79", 56667)],
+        "proxy-groups": [{"name": "🌐 本机导入", "type": "select", "proxies": [tokyo]}],
+        "rules": ["MATCH,PROXY"],
+    }, allow_unicode=True), encoding="utf-8")
+
+    data1, *_ = ali.build_data(target, pool, set(), pool_proxies=pool)
+    target.write_text(yaml.safe_dump(data1, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    data2, added2, removed2, refreshed2 = ali.build_data(target, pool, set(), pool_proxies=pool)
+    assert refreshed2 == 0
+    assert added2 == 0 and removed2 == 0
+    assert yaml.safe_dump(data1, allow_unicode=True, sort_keys=False) == \
+        yaml.safe_dump(data2, allow_unicode=True, sort_keys=False)
+
+
+def test_build_data_never_touches_live_only_legacy_nodes(tmp_path, pool):
+    legacy = "[自建] 🇺🇸GVPS-AnyTLS-googlevps"
+    target = tmp_path / "config.yaml"
+    target.write_text(yaml.safe_dump({
+        "proxies": [_proxy(legacy, "vps.mango9502.cc.cd", 60629, "anytls")],
+        "proxy-groups": [{"name": "🌐 本机导入", "type": "select", "proxies": [legacy]}],
+        "rules": ["MATCH,PROXY"],
+    }, allow_unicode=True), encoding="utf-8")
+
+    data, added, removed, refreshed = ali.build_data(target, pool, set(), pool_proxies=pool)
+    node = next(p for p in data["proxies"] if p["name"] == legacy)
+    assert node["port"] == 60629  # live-only node untouched by the pool
+    assert refreshed == 0
+    assert removed == 0
+    assert sum(1 for p in data["proxies"] if p["name"] == legacy) == 1
+
+
+def test_same_upstream_port_is_text_agnostic():
+    assert ali.same_upstream(
+        _proxy("X", "1.2.3.4", "443"), _proxy("Y", "1.2.3.4", 443)
+    )
+    assert not ali.same_upstream(
+        _proxy("X", "1.2.3.4", 443), _proxy("Y", "1.2.3.4", 446)
+    )
+
+
+def test_rules_only_rewrite_node_in_last_segment(tmp_path, pool):
+    """Lock the documented contract: only the last rule segment is a node."""
+    data = {
+        "proxies": [_proxy(IN_INDIA, "20.198.2.112", 56667)],
+        "proxy-groups": [{"name": "PROXY", "type": "select", "proxies": [IN_INDIA, "DIRECT"]}],
+        "listeners": [],
+        "rules": [
+            "IN-USER,zen_key_2," + IN_INDIA,
+            "IP-CIDR,20.198.2.112," + IN_INDIA + ",no-resolve",
+        ],
+    }
+    nodes, refs = ali.rename_self_built(data, pool)
+    assert nodes == 1
+    assert refs >= 1
+    assert data["rules"][0] == "IN-USER,zen_key_2," + IN_INDIA_FLAGGED
+    # node followed by a modifier is not in the last segment -> left untouched
+    assert data["rules"][1] == "IP-CIDR,20.198.2.112," + IN_INDIA + ",no-resolve"
