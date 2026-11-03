@@ -26,6 +26,12 @@ from pathlib import Path
 
 import yaml
 
+try:
+    from clash_lock import ClashConfigLock, atomic_write_text
+except ImportError:  # script loaded by path (tests) without its dir on sys.path
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from clash_lock import ClashConfigLock, atomic_write_text
+
 CLASH_DIR = Path("/personal/clash")
 CFG = CLASH_DIR / "config.yaml"
 MERGED = CLASH_DIR / "config.mac-merged.yaml"
@@ -162,26 +168,27 @@ def write_listener(target: str) -> None:
         "listen": "127.0.0.1",
         "proxy": target,
     }
-    for path in (MERGED, CFG):
-        if not path.is_file():
-            continue
-        original = path.read_text(encoding="utf-8")
-        data = yaml.safe_load(original)
-        others = [l for l in (data.get("listeners") or []) if l.get("name") != LISTENER_NAME]
-        data["listeners"] = others + [listener]
+    with ClashConfigLock():
+        for path in (MERGED, CFG):
+            if not path.is_file():
+                continue
+            original = path.read_text(encoding="utf-8")
+            data = yaml.safe_load(original)
+            others = [l for l in (data.get("listeners") or []) if l.get("name") != LISTENER_NAME]
+            data["listeners"] = others + [listener]
 
-        body = yaml.dump(data, Dumper=NoAliasDumper, allow_unicode=True,
-                         sort_keys=False, width=120, default_flow_style=False)
-        check = yaml.safe_load(body)
-        n_px, n_rules = len(check.get("proxies") or []), len(check.get("rules") or [])
-        if n_px < MIN_PROXIES or n_rules < MIN_RULES:
-            raise SystemExit(f"ABORT sanity: {path.name} proxies={n_px} rules={n_rules}")
-        if not check.get("mixed-port"):
-            raise SystemExit(f"ABORT sanity: {path.name} lost mixed-port")
+            body = yaml.dump(data, Dumper=NoAliasDumper, allow_unicode=True,
+                             sort_keys=False, width=120, default_flow_style=False)
+            check = yaml.safe_load(body)
+            n_px, n_rules = len(check.get("proxies") or []), len(check.get("rules") or [])
+            if n_px < MIN_PROXIES or n_rules < MIN_RULES:
+                raise SystemExit(f"ABORT sanity: {path.name} proxies={n_px} rules={n_rules}")
+            if not check.get("mixed-port"):
+                raise SystemExit(f"ABORT sanity: {path.name} lost mixed-port")
 
-        path.with_suffix(path.suffix + f".pre-guard-{ts}").write_text(original, encoding="utf-8")
-        path.write_text(header_of(path) + body, encoding="utf-8")
-        log(f"  wrote {path.name} listener.proxy={target} (bak .pre-guard-{ts})")
+            atomic_write_text(path.with_suffix(path.suffix + f".pre-guard-{ts}"), original)
+            atomic_write_text(path, header_of(path) + body)
+            log(f"  wrote {path.name} listener.proxy={target} (bak .pre-guard-{ts})")
 
 
 def reload_from_disk() -> bool:

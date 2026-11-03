@@ -86,3 +86,40 @@ class ClashConfigLock:
         finally:
             self._rlock.release()
         return False
+
+
+def atomic_write_text(target: Path, content: str) -> None:
+    """Replace *target* atomically, preserving its mode and ownership.
+
+    ``Path.write_text`` truncates before writing, so a reader in another host's
+    kernel (the shared NFS mount is ``nolock``) — or the process dying mid-write
+    — can observe a partial YAML document. ``os.replace`` within the same
+    directory is atomic; the temp file inherits the live file's mode and owner so
+    the gateway user keeps write access.
+    """
+    try:
+        st = target.stat()
+    except OSError:
+        st = None
+    tmp = target.with_name(f'.{target.name}.tmp-{os.getpid()}')
+    try:
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            fh.write(content)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if st is not None:
+            try:
+                os.chmod(tmp, st.st_mode & 0o7777)
+            except OSError:
+                pass
+            try:
+                os.chown(tmp, st.st_uid, st.st_gid)
+            except OSError:
+                pass
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
