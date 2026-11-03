@@ -23,6 +23,12 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import yaml
 
+try:
+    from clash_lock import ClashConfigLock
+except ImportError:  # script loaded by path (tests) without its dir on sys.path
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from clash_lock import ClashConfigLock
+
 # ROOT configuration supporting CLASH_ROOT environment variable
 CLASH_ROOT_ENV = os.environ.get('CLASH_ROOT')
 ROOT = Path(CLASH_ROOT_ENV).resolve() if CLASH_ROOT_ENV else Path('/personal/clash')
@@ -272,6 +278,20 @@ def reload_live() -> int:
 
 
 def reconcile(dry_run: bool = False) -> Dict[str, Any]:
+    """Rewrite user rules into the live configs under the shared config lock.
+
+    This is the third writer of ``config.yaml`` / ``config.mac-merged.yaml``
+    (besides the keeper's ``apply-local-import`` and the gateway's
+    ``reconcile_target_config``). It used to hold only ``.user-rules.lock``,
+    which nothing else takes, so a gateway admin action could interleave with
+    the rule injection and lose one of the two updates. Reentrant, so the
+    gateway calling this while it already holds the lock nests fine.
+    """
+    with ClashConfigLock():
+        return _reconcile_impl(dry_run)
+
+
+def _reconcile_impl(dry_run: bool = False) -> Dict[str, Any]:
     user_rules_data = load_user_rules()
     user_rules_list = user_rules_data.get('rules', [])
     allowed_targets = get_available_targets()

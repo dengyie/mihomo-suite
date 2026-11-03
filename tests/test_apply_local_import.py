@@ -289,3 +289,30 @@ def test_rules_only_rewrite_node_in_last_segment(tmp_path, pool):
     assert data["rules"][0] == "IN-USER,zen_key_2," + IN_INDIA_FLAGGED
     # node followed by a modifier is not in the last segment -> left untouched
     assert data["rules"][1] == "IP-CIDR,20.198.2.112," + IN_INDIA + ",no-resolve"
+
+
+def test_atomic_write_preserves_mode_and_leaves_no_temp(tmp_path):
+    target = tmp_path / "config.yaml"
+    target.write_text("old\n", encoding="utf-8")
+    target.chmod(0o664)
+
+    ali.atomic_write_text(target, "new\n")
+
+    assert target.read_text(encoding="utf-8") == "new\n"
+    assert (target.stat().st_mode & 0o777) == 0o664
+    assert [p.name for p in tmp_path.iterdir()] == ["config.yaml"]
+
+
+def test_atomic_write_keeps_original_when_replace_fails(tmp_path, monkeypatch):
+    target = tmp_path / "config.yaml"
+    target.write_text("original\n", encoding="utf-8")
+
+    def boom(src, dst):
+        raise OSError("nfs hiccup")
+
+    monkeypatch.setattr(ali.os, "replace", boom)
+    with pytest.raises(OSError):
+        ali.atomic_write_text(target, "replacement\n")
+
+    assert target.read_text(encoding="utf-8") == "original\n"
+    assert [p.name for p in tmp_path.iterdir()] == ["config.yaml"]

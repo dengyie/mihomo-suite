@@ -548,6 +548,43 @@ def reload_live() -> int:
         return response.status
 
 
+def atomic_write_text(target: Path, content: str) -> None:
+    """Replace *target* atomically, preserving its mode and ownership.
+
+    ``Path.write_text`` truncates before writing, so a reader in another host's
+    kernel (the shared NFS mount is ``nolock``) — or the process dying mid-write
+    — can observe a partial YAML document. ``os.replace`` within the same
+    directory is atomic; the temp file inherits the live file's mode and owner so
+    the gateway user keeps write access.
+    """
+    try:
+        st = target.stat()
+    except OSError:
+        st = None
+    tmp = target.with_name(f'.{target.name}.tmp-{os.getpid()}')
+    try:
+        with open(tmp, 'w', encoding='utf-8') as fh:
+            fh.write(content)
+            fh.flush()
+            os.fsync(fh.fileno())
+        if st is not None:
+            try:
+                os.chmod(tmp, st.st_mode & 0o7777)
+            except OSError:
+                pass
+            try:
+                os.chown(tmp, st.st_uid, st.st_gid)
+            except OSError:
+                pass
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def main() -> None:
     airport = resolve_airport(ROOT)
     try:
@@ -576,9 +613,11 @@ def main() -> None:
     if not targets:
         print('no clash config targets; skip')
         return
-    # Same lock the gateway's reconcile_target_config takes: one writer at a
-    # time across processes, so neither side's read-modify-write clobbers the
-    # other's update.
+    # Same lock the gateway's reconcile_target_config takes, so two writers in
+    # this kernel cannot interleave their read-modify-write. The NFS mount is
+    # `nolock`, so this does NOT serialize a writer in another host's kernel
+    # (pxed's gateway writing the same file); route admin writes through one
+    # host if that ever matters.
     with ClashConfigLock():
         for target in targets:
             data, added, removed, refreshed = build_data(target, imported, disabled, pool_proxies)
@@ -593,7 +632,7 @@ def main() -> None:
             except OSError as e:
                 print(f'{target.name}: backup failed ({e}); refusing to write', file=sys.stderr)
                 continue
-            target.write_text(rendered)
+            atomic_write_text(target, rendered)
             print(f'{target.name}: changed added={added} removed={removed} refreshed={refreshed} members={len(names)}')
             if target.name == 'config.yaml':
                 changed_live = True

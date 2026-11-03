@@ -8,6 +8,13 @@ process would deadlock each other. This wrapper keeps one fd per lock path per
 process plus a reentrant in-process mutex, so nested acquisition (e.g. an admin
 action that already holds the lock calling ``reconcile_target_config``) is a
 no-op while cross-process writers still serialize on the flock.
+
+Scope caveat: the lock file lives on the shared ``/personal`` NFS mount, which is
+mounted with ``nolock,local_lock=all``. ``flock`` is therefore enforced only by
+the local kernel: it serializes writers on the *same* host, but a writer in
+another host's kernel (e.g. pxed's gateway writing the same config) is not
+blocked. The lock removes the intra-host interleaving; cross-host last-writer
+wins remains possible and is handled by atomic replacement rather than locking.
 """
 from __future__ import annotations
 

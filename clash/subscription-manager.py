@@ -47,7 +47,6 @@ ROOT = Path(CLASH_ROOT_ENV).resolve() if CLASH_ROOT_ENV else Path('/personal/cla
 META_FILE = ROOT / 'subscriptions/meta.json'
 RAW_CACHE_DIR = ROOT / 'subscriptions/raw'
 MERGED_OUTPUT_FILE = ROOT / 'airports/airport-merged-sub.yaml'
-LOCK_FILE = ROOT / 'subscriptions/.subscription.lock'
 DISABLED_NODES_FILE = ROOT / 'airports/disabled-nodes.txt'
 CLIENT_EXPORT_TOKEN_FILE = ROOT / 'subscriptions/client-export.token'
 LOCAL_NODES_FILE = ROOT / 'airports/local-nodes.yaml'
@@ -944,9 +943,14 @@ def reconcile_target_config(
 
     Every live-config writer goes through here or through the keeper's
     ``apply-local-import``, which takes the same lock file, so concurrent RMW
-    can no longer clobber the other writer's update. Reentrant, so admin
-    actions that already hold the lock (add/update/delete subscription) nest
-    without self-deadlocking.
+    within one host's kernel cannot clobber the other writer's update. Reentrant,
+    so admin actions that already hold the lock (add/update/delete subscription)
+    nest without self-deadlocking.
+
+    The lock file sits on the shared NFS mount, mounted ``nolock``: a writer in
+    another host's kernel is not serialized, so cross-host last-writer-wins
+    remains possible. Writes are atomic (``safe_atomic_write``), so the loser of
+    a race is a lost update, never a corrupt config.
     """
     with ClashConfigLock():
         return _reconcile_target_config_impl(target_path, active_proxies, disabled_nodes)
