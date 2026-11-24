@@ -58,7 +58,8 @@ CLIENT_EXPORT_TOKEN_MODE = 0o640
 # 2026-10-23: REV '11' - 源端统一下发 🏠家宽 分组与 hybgzs.com 家宽路由
 # 2026-11-03: REV '12' - 自建节点统一 [自建] 前缀, 客户端导出跟随改名
 # 2026-11-03: REV '13' - 自建节点加地区国旗 (如 [自建] 🇭🇰TUIC-Azure)
-CLIENT_EXPORT_RENDER_REV = '13'
+# 2026-11-10: REV '14' - 移除 MangoCF 策略组与 12 条 mangoqwq.com 规则(落入 MATCH,PROXY 兜底), 移除 🏠home-win-CF
+CLIENT_EXPORT_RENDER_REV = '15'  # 2026-11-24: +🎯Meta 组 (Facebook/Muse.ai 专组, REV 14→15)
 CLIENT_BUILTIN_OUTBOUNDS = frozenset({
     'DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'COMPATIBLE', 'GLOBAL',
 })
@@ -153,7 +154,6 @@ CLIENT_STUN_RULES = [
 CLIENT_DIRECT_RULES = [
     'DOMAIN-SUFFIX,argotunnel.com,DIRECT',
     'DOMAIN-SUFFIX,cloudflare.com,DIRECT',
-    'DOMAIN-SUFFIX,mangoqwq.com,DIRECT',
     'DOMAIN-SUFFIX,kryptex.network,DIRECT',
     'DOMAIN-SUFFIX,kryptex.com,DIRECT',
     'IP-CIDR,104.208.65.233/32,DIRECT,no-resolve',
@@ -163,10 +163,10 @@ CLIENT_DIRECT_RULES = [
     'GEOIP,LAN,DIRECT,no-resolve',
 ]
 
-# 2026-10-23: 国内家宽出口分组。默认成员 🏠home-win-CF(上海移动家宽 CF Tunnel), DIRECT 兜底。
+# 2026-10-23: 国内家宽出口分组。仅保留 🏠home-win-mesh(上海移动家宽 EasyTier Mesh直连), DIRECT 兜底。
 # 新增要走家宽的站点只需往 CLIENT_HOME_BROADBAND_SUFFIXES 追加后缀, 渲染时自动展开成规则。
 HOME_GROUP = '🏠家宽'
-CLIENT_HOME_GROUP_FALLBACK = ['🏠home-win-CF', 'DIRECT']
+CLIENT_HOME_GROUP_FALLBACK = ['🏠home-win-mesh', 'DIRECT']
 CLIENT_HOME_BROADBAND_SUFFIXES = ['hybgzs.com']
 CLIENT_HOME_BROADBAND_RULES = [
     'DOMAIN-SUFFIX,%s,%s' % (domain, HOME_GROUP)
@@ -210,6 +210,52 @@ CLIENT_CLAUDE_RULES = [
     'IP-CIDR,160.79.104.0/21,' + CLAUDE_GROUP + ',no-resolve',
     'IP-CIDR6,2607:6bc0::/32,' + CLAUDE_GROUP + ',no-resolve',
 ]
+# 2026-11-24: Meta 专组 (对齐 §二十三 Claude 模式)。Facebook/Instagram/WhatsApp/
+# Threads 全家桶 + muse.ai (Meta Muse 视频模型网页端, Meta CDN, 境内直连流级
+# 丢包判死刑, 见 muse2api 手册)。IP 段经 RIPEstat 核对全部在 AS32934 宣告内;
+# 沿用 Claude 教训严禁 IP-ASN (ASN.mmdb 缺失时 mihomo 联网下载 90s 超时炸配置)。
+META_GROUP = '🎯Meta'
+CLIENT_META_RULES = [
+    # Facebook 全家桶
+    'DOMAIN-SUFFIX,facebook.com,' + META_GROUP,
+    'DOMAIN-SUFFIX,facebook.net,' + META_GROUP,
+    'DOMAIN-SUFFIX,fb.com,' + META_GROUP,
+    'DOMAIN-SUFFIX,fbcdn.net,' + META_GROUP,
+    'DOMAIN-SUFFIX,fbsbx.com,' + META_GROUP,
+    'DOMAIN-SUFFIX,facebookmail.com,' + META_GROUP,
+    'DOMAIN-SUFFIX,facebook_rewards.com,' + META_GROUP,
+    'DOMAIN-SUFFIX,thefacebook.com,' + META_GROUP,
+    'DOMAIN-SUFFIX,facebookstudy.com,' + META_GROUP,
+    'DOMAIN-SUFFIX,meta.com,' + META_GROUP,
+    'DOMAIN-SUFFIX,meta.ai,' + META_GROUP,
+    'DOMAIN-SUFFIX,metacareers.com,' + META_GROUP,
+    # Instagram
+    'DOMAIN-SUFFIX,instagram.com,' + META_GROUP,
+    'DOMAIN-SUFFIX,cdninstagram.com,' + META_GROUP,
+    'DOMAIN-SUFFIX,instagr.am,' + META_GROUP,
+    'DOMAIN-SUFFIX,ig.me,' + META_GROUP,
+    # WhatsApp
+    'DOMAIN-SUFFIX,whatsapp.com,' + META_GROUP,
+    'DOMAIN-SUFFIX,whatsapp.net,' + META_GROUP,
+    'DOMAIN-SUFFIX,wa.me,' + META_GROUP,
+    'DOMAIN-SUFFIX,whatsapp.com.cdn.cloudflare.net,' + META_GROUP,
+    # Threads
+    'DOMAIN-SUFFIX,threads.net,' + META_GROUP,
+    'DOMAIN-SUFFIX,threads.com,' + META_GROUP,
+    # Muse (Meta Muse 视频模型网页端, Meta CDN)
+    'DOMAIN-SUFFIX,muse.ai,' + META_GROUP,
+    # IP 段兜底 (AS32934 Facebook / AS63293 Meta, no-resolve 防泄漏)
+    'IP-CIDR,157.240.0.0/16,' + META_GROUP + ',no-resolve',
+    'IP-CIDR,69.63.176.0/20,' + META_GROUP + ',no-resolve',
+    'IP-CIDR,66.220.144.0/20,' + META_GROUP + ',no-resolve',
+    'IP-CIDR,163.70.128.0/17,' + META_GROUP + ',no-resolve',
+    'IP-CIDR,185.60.216.0/22,' + META_GROUP + ',no-resolve',
+    'IP-CIDR,129.134.0.0/16,' + META_GROUP + ',no-resolve',
+    'IP-CIDR,31.13.64.0/18,' + META_GROUP + ',no-resolve',
+    'IP-CIDR,57.144.0.0/14,' + META_GROUP + ',no-resolve',
+    'IP-CIDR6,2620:0:1c00::/40,' + META_GROUP + ',no-resolve',
+    'IP-CIDR6,2a03:2880::/29,' + META_GROUP + ',no-resolve',
+]
 OPENAI_GROUP = '🎯OpenAI'
 CLIENT_OPENAI_RULES = [
     'DOMAIN-SUFFIX,openai.com,' + OPENAI_GROUP,
@@ -243,33 +289,12 @@ CLIENT_GOOGLE_RULES = [
     'DOMAIN-SUFFIX,gmail.com,' + GOOGLE_GROUP,
 ]
 CLIENT_FINAL_RULES = ['MATCH,PROXY']
-
-# 2026-10-01: MangoCF 橙标域名直连优先+故障回落(源端统一下发; 机制/教训全文见 clash 规则.md §十九)。
-# fallback 按序取第一个存活成员: DIRECT 探针 1.5s 内通=直连; v4 波浪判死→AUTO(自动最快存活节点)→PROXY(手选兜底), 恢复自动切回。
-# 探针必须与被保护域同 CF IP 段(GFW 波浪按段打击, cloudflare.com 的 104.16 段测不出 mangoqwq 104.21/172.67 段的波浪);
-# favicon 走 CF 边缘缓存(cf-cache-status HIT, max-age=14400), 与 hub 源站解耦。
-MANGO_CF_GROUP_NAME = 'MangoCF'
-CLIENT_MANGO_CF_GROUP = {
-    'name': MANGO_CF_GROUP_NAME,
-    'type': 'fallback',
-    'proxies': ['DIRECT', 'AUTO', 'PROXY'],
-    'url': 'https://vps.mangoqwq.com/favicon.ico',
-    'interval': 5,
-    'timeout': 1000,
-    'lazy': False,
-}
-# 2026-10-01(下午): 白名单改为例外清单+全域 suffix——download.mangoqwq.com 等新增子域不在 13 条名单内仍吃 v4 波浪;
-# 现仅 ssh-*/frp/doh/home-node/cpa.us(灰云)/check(本机 hosts 服务) 保持 DIRECT, 其余 *.mangoqwq.com 全部进 MangoCF。
-CLIENT_MANGO_CF_EXCEPT_RULES = [
-    'DOMAIN,%s.mangoqwq.com,DIRECT' % d
-    for d in ('ssh-tebi', 'ssh-pxed', 'ssh-home', 'ssh-laptop', 'frp', 'doh', 'doh-demo', 'home-node', 'cpa.us', 'check', 'check-api')
-]
-CLIENT_MANGO_CF_RULES = CLIENT_MANGO_CF_EXCEPT_RULES + ['DOMAIN-SUFFIX,mangoqwq.com,%s' % MANGO_CF_GROUP_NAME]
 _US_GOOGLE_NAME = re.compile(r'美国_BGP|北美洲】美国\d+原生')
 LOCAL_GROUP_VPS = 'vps-import'
 LOCAL_GROUP_GOOGLE = 'google'
 LOCAL_GROUP_OPENAI = 'openai'
 LOCAL_GROUP_CLAUDE = 'claude'
+LOCAL_GROUP_META = 'meta'
 LOCAL_GROUP_GROK = 'grok'
 
 
@@ -315,6 +340,11 @@ def _is_us_claude_node(name: str) -> bool:
     if strip_self_tag(n) == 'TUIC-googlevps':
         return True
     return _US_CLAUDE_NAME.search(n) is not None
+
+
+def _is_us_meta_node(name: str) -> bool:
+    """Fallback US-Meta name filter when local-nodes.yaml has no groups.meta (2026-11-24)."""
+    return _is_us_claude_node(name)
 
 
 def normalize_simple_groups(raw: Any) -> Dict[str, List[str]]:
@@ -2691,7 +2721,13 @@ class SubscriptionEngine:
             if not name or name in disabled or name in seen:
                 continue
             seen.add(name)
-            proxies.append(node)
+            node_copy = dict(node)
+            # Server uses loopback port-forward (127.0.0.1:10882) on no-TUN host;
+            # client export connects directly to home-win over EasyTier mesh (10.144.144.10:8082).
+            if strip_self_tag(name) == '🏠home-win-mesh':
+                node_copy['server'] = '10.144.144.10'
+                node_copy['port'] = 8082
+            proxies.append(node_copy)
 
         proxies = drop_unresolved_dialer_proxies(proxies)
         names = [str(p['name']) for p in proxies]
@@ -2714,6 +2750,14 @@ class SubscriptionEngine:
             LOCAL_GROUP_CLAUDE,
             available,
             fallback=claude_fallback,
+        ) or ['PROXY']
+        # 2026-11-24: Meta 组成员对齐 Claude (同一美国纯净出口选型)。
+        meta_fallback = [n for n in names if _is_us_meta_node(n)]
+        meta_members = resolve_simple_group(
+            simple_groups,
+            LOCAL_GROUP_META,
+            available,
+            fallback=meta_fallback,
         ) or ['PROXY']
         openai_fallback = [n for n in names if _is_us_openai_node(n)]
         openai_members = resolve_simple_group(
@@ -2743,7 +2787,6 @@ class SubscriptionEngine:
             'dns': dict(CLIENT_DNS),
             'proxies': proxies,
             'proxy-groups': [
-                dict(CLIENT_MANGO_CF_GROUP),
                 {
                     'name': 'PROXY',
                     'type': 'select',
@@ -2768,6 +2811,11 @@ class SubscriptionEngine:
                     'proxies': claude_members,
                 },
                 {
+                    'name': META_GROUP,
+                    'type': 'select',
+                    'proxies': meta_members,
+                },
+                {
                     'name': OPENAI_GROUP,
                     'type': 'select',
                     'proxies': openai_members,
@@ -2779,12 +2827,12 @@ class SubscriptionEngine:
                 },
             ],
             'rules': (
-                list(CLIENT_MANGO_CF_RULES)
-                + list(CLIENT_DOMESTIC_MEDIA_RULES)
+                list(CLIENT_DOMESTIC_MEDIA_RULES)
                 + list(CLIENT_STUN_RULES)
                 + list(CLIENT_DIRECT_RULES)
                 + list(CLIENT_HOME_BROADBAND_RULES)
                 + list(CLIENT_CLAUDE_RULES)
+                + list(CLIENT_META_RULES)
                 + list(CLIENT_OPENAI_RULES)
                 + list(CLIENT_GOOGLE_RULES)
                 + list(CLIENT_FINAL_RULES)

@@ -313,6 +313,71 @@ def refresh_self_built_fields(data: dict, imported: list[dict]) -> int:
     return refreshed
 
 
+def load_gateway_relays() -> dict[str, str]:
+    """Gateway-only relay overlay: ``airports/gateway-relays.yaml``.
+
+    Nodes the gateway host cannot dial directly (IPv6-only, tebi has no v6
+    route) still sit in the pool file, which also feeds the client export.
+    Putting ``dialer-proxy`` there would chain *clients* through our mesh, so
+    the relay lives here instead and only ever touches the live configs::
+
+        default-dialer: '[自建] 🇯🇵VLESS-AWS-Tokyo-Reality'
+        relays:
+          - '[tomorin] HK LUCID TCP IPv6'
+          - {name: '[自建] 🇺🇸Mesh-googlevps-EasyTier', dialer: '...'}
+    """
+    path = ROOT / 'airports/gateway-relays.yaml'
+    if not path.exists():
+        return {}
+    data = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(data, dict):
+        return {}
+    default = str(data.get('default-dialer') or '').strip()
+    out: dict[str, str] = {}
+    for item in data.get('relays') or []:
+        if isinstance(item, str):
+            name, dialer = item.strip(), default
+        elif isinstance(item, dict):
+            name = str(item.get('name') or '').strip()
+            dialer = str(item.get('dialer') or default).strip()
+        else:
+            continue
+        if name and dialer:
+            out[name] = dialer
+    return out
+
+
+def apply_gateway_relays(data: dict, relays: dict[str, str],
+                         pool_proxies: list[dict], disabled: set[str]) -> set[str]:
+    """Ensure each relayed pool node is in ``data`` with its gateway dialer.
+
+    Never touches groups (probe/managed only, production routing unchanged).
+    Skips names missing from the pool, disabled names, and configs that do not
+    carry the dialer. Returns the names applied (exempt from the orphan sweep).
+    """
+    if not relays:
+        return set()
+    pool = {p['name']: p for p in pool_proxies or []
+            if isinstance(p, dict) and isinstance(p.get('name'), str)}
+    proxies = data.setdefault('proxies', [])
+    index = {p.get('name'): i for i, p in enumerate(proxies) if isinstance(p, dict)}
+    applied: set[str] = set()
+    for name, dialer in relays.items():
+        src = pool.get(name)
+        if src is None or is_disabled(name, disabled) or dialer not in index or dialer == name:
+            continue
+        desired = copy.deepcopy(src)
+        desired.pop('dialer_proxy', None)
+        desired['dialer-proxy'] = dialer
+        if name in index:
+            proxies[index[name]] = desired
+        else:
+            index[name] = len(proxies)
+            proxies.append(desired)
+        applied.add(name)
+    return applied
+
+
 def resolve_airport(root: Path) -> Path:
     env = os.environ.get('APPLY_LOCAL_IMPORT_FILE', '').strip()
     if env:
@@ -359,7 +424,14 @@ def normalize_simple_groups(raw) -> dict[str, list[str]]:
     return groups
 
 
-def load_vps_import(path: Path) -> tuple[list[dict], list[str], list[dict]] | None:
+POOL_GROUP_MAP = {
+    'google': '🎯Google',
+    'openai': '🎯OpenAI',
+    'claude': '🎯Claude',
+}
+
+
+def load_vps_import(path: Path) -> tuple[list[dict], list[str], list[dict], dict[str, list[str]]] | None:
     data = yaml.safe_load(path.read_text()) or {}
     if isinstance(data, list):
         proxies = data
@@ -378,7 +450,7 @@ def load_vps_import(path: Path) -> tuple[list[dict], list[str], list[dict]] | No
     }
     names = [name for name in groups[VPS_GROUP] if name in by_name]
     imported = [by_name[name] for name in names]
-    return imported, names, proxies
+    return imported, names, proxies, groups
 
 
 def home_pref(bare: str, valid_references: set[str]) -> str | None:
@@ -402,6 +474,8 @@ def build_data(
     imported: list[dict],
     disabled: set[str],
     pool_proxies: list[dict] | None = None,
+    pool_groups: dict[str, list[str]] | None = None,
+    gateway_relays: dict[str, str] | None = None,
 ) -> tuple[dict, int, int, int]:
     data = yaml.safe_load(target.read_text()) or {}
     rename_self_built(data, pool_proxies if pool_proxies is not None else imported)
@@ -409,6 +483,11 @@ def build_data(
     # pool name, so the pool can now hand over the authoritative fields.
     refreshed = refresh_self_built_fields(
         data, pool_proxies if pool_proxies is not None else imported
+    )
+    # after the refresh, which would otherwise wipe the gateway-only dialer
+    relayed = apply_gateway_relays(
+        data, gateway_relays or {},
+        pool_proxies if pool_proxies is not None else imported, disabled,
     )
     proxies = data.get('proxies') or []
     existing = {
@@ -425,11 +504,14 @@ def build_data(
 
     groups = data.setdefault('proxy-groups', [])
     group = next((item for item in groups if item.get('name') == GROUP), None)
+    # relay-overlay nodes outside vps-import are probe-only: the group sync
+    # below must never add them (existing memberships are left as they are)
+    relay_only = relayed - {p.get('name') for p in imported if isinstance(p, dict)}
     all_names = {
         proxy.get('name')
         for proxy in data.get('proxies') or []
         if isinstance(proxy, dict)
-    }
+    } - relay_only
     if group is not None:
         group['proxies'] = [
             proxy.get('name')
@@ -448,6 +530,23 @@ def build_data(
                             continue
                         current_members.append(pname)
                 grp['proxies'] = current_members
+
+    if pool_groups:
+        for pkey, gname in POOL_GROUP_MAP.items():
+            if pkey in pool_groups:
+                target_grp = next((item for item in groups if item.get('name') == gname), None)
+                if target_grp is None:
+                    target_grp = {'name': gname, 'type': 'select', 'proxies': []}
+                    idx = next((i for i, g in enumerate(groups) if g.get('name') == '🎯OpenAI'), -1)
+                    if idx >= 0:
+                        groups.insert(idx + 1, target_grp)
+                    else:
+                        groups.append(target_grp)
+                curr_members = list(target_grp.get('proxies') or [])
+                for pname in pool_groups[pkey]:
+                    if pname and not is_disabled(pname, disabled) and pname in all_names and pname not in curr_members:
+                        curr_members.append(pname)
+                target_grp['proxies'] = curr_members
 
     kept = []
     removed = 0
@@ -468,6 +567,7 @@ def build_data(
             bool(injected_prefix.match(p_name))
             and not p_name.startswith(SELF_TAG)
             and p_name not in imported_names
+            and p_name not in relayed
             and not is_disabled(p_name, disabled)
         )
         if not p_name or is_disabled(p_name, disabled) or is_third_party_or_blocked(p_name) or orphan:
@@ -483,28 +583,29 @@ def build_data(
     for item in data.get('proxy-groups') or []:
         if isinstance(item, dict):
             g_name = item.get('name')
-            cleaned = [
-                name for name in (item.get('proxies') or [])
-                if name in valid_references and not is_disabled(name, disabled) and not is_third_party_or_blocked(name)
-            ]
+            seen = set()
+            cleaned = []
+            for name in (item.get('proxies') or []):
+                if (
+                    name in valid_references
+                    and not is_disabled(name, disabled)
+                    and not is_third_party_or_blocked(name)
+                    and name not in seen
+                ):
+                    seen.add(name)
+                    cleaned.append(name)
             if g_name == 'AUTO':
                 cleaned = [name for name in cleaned if not is_auto_excluded(name)]
             elif g_name == 'PROXY':
                 cleaned = [name for name in cleaned if not any(k in name.lower() for k in ('reverse', '17897', 'pxed-bridge'))]
             elif g_name == 'cpa-clean-egress':
                 cleaned = [name for name in cleaned if not any(k in name.lower() for k in ('reverse', '17897'))]
-                # 2026-11-02: 家宽优先走 mesh。CF 隧道链路掉线时 fallback 会跳过它
-                # 落到国内 Reality 节点(cpa-clean-egress 语义是住宅家宽出口);
-                # mesh 与 CF 同一家宽出口但经 easytier 直连更稳, CF 降为次选。
-                # 仅对 fallback 形态生效, 不动 config.mac-merged 的 select 形态。
-                bare = ('🏠home-win-CF', '🏠home-win-mesh') if item.get('type') == 'fallback' else ('🏠home-win-CF',)
-                prefs = tuple(p for p in (home_pref(b, valid_references) for b in bare) if p)
-                for pref in prefs:
-                    if pref not in cleaned:
-                        cleaned.insert(0, pref)
-                    elif cleaned[0] != pref:
-                        cleaned.remove(pref)
-                        cleaned.insert(0, pref)
+                # 家宽优先走 mesh。mesh 与 CF 同一家宽出口但经 easytier 直连更稳, CF 降为次选。
+                # 无论 fallback 还是 select 形态, 统一显式保证 🏠home-win-mesh 置顶、CF 次选。
+                desired_order = ('🏠home-win-mesh', '🏠home-win-CF')
+                active_prefs = [p for b in desired_order for p in (home_pref(b, valid_references),) if p]
+                pref_set = set(active_prefs)
+                cleaned = active_prefs + [name for name in cleaned if name not in pref_set]
             if not cleaned:
                 cleaned = ['PROXY'] if 'PROXY' in valid_references and g_name != 'PROXY' else ['DIRECT']
             item['proxies'] = cleaned
@@ -562,11 +663,12 @@ def main() -> None:
     if loaded is None:
         print(f'{airport.name}: no groups.{VPS_GROUP}; skip (refusing full-file dump)')
         return
-    imported, names, pool_proxies = loaded
+    imported, names, pool_proxies, pool_groups = loaded
     if not names:
         print(f'{airport.name}: groups.{VPS_GROUP} empty; skip')
         return
     disabled = load_disabled()
+    relays = load_gateway_relays()
     timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
     changed_live = False
     targets = tuple(
@@ -583,7 +685,10 @@ def main() -> None:
     # host if that ever matters.
     with ClashConfigLock():
         for target in targets:
-            data, added, removed, refreshed = build_data(target, imported, disabled, pool_proxies)
+            data, added, removed, refreshed = build_data(
+                target, imported, disabled, pool_proxies, pool_groups=pool_groups,
+                gateway_relays=relays,
+            )
             rendered = yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=120)
             current = target.read_text()
             if rendered == current:

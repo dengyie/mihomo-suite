@@ -732,7 +732,7 @@ def test_render_client_clash_config_includes_dns_and_local_nodes(temp_clash_root
     assert doc["dns"]["enhanced-mode"] == "fake-ip"
     assert "https://doh.pub/dns-query" in doc["dns"]["proxy-server-nameserver"]
     assert "+.argotunnel.com" in doc["dns"]["fake-ip-filter"]
-    assert "DOMAIN-SUFFIX,mangoqwq.com,DIRECT" in doc["rules"]
+    assert not any("mangoqwq.com" in r for r in doc["rules"])
     assert "DOMAIN-SUFFIX,meeting.tencent.com,DIRECT" in doc["rules"]
     assert "DOMAIN,stun.cloudflare.com,PROXY" in doc["rules"]
     assert "DST-PORT,3478,PROXY" in doc["rules"]
@@ -744,6 +744,7 @@ def test_render_client_clash_config_includes_dns_and_local_nodes(temp_clash_root
     assert doc["allow-lan"] is False
     assert "any:53" in doc["tun"]["dns-hijack"]
     groups = {g["name"]: g for g in doc["proxy-groups"]}
+    assert "MangoCF" not in groups
     assert groups["PROXY"]["type"] == "select"
     assert groups["AUTO"]["type"] == "url-test"
     assert groups["🎯Google"]["type"] == "select"
@@ -798,7 +799,7 @@ def test_client_clash_export_webrtc_stun_and_media_rules_ordering(temp_clash_roo
     assert idx_media < idx_stun_domain
     assert idx_stun_domain < idx_cf
     assert idx_stun_port < idx_cf
-    assert sm.CLIENT_EXPORT_RENDER_REV == "13"
+    assert sm.CLIENT_EXPORT_RENDER_REV == "15"
 
 
 def test_client_home_broadband_group_routes_hybgzs(temp_clash_root):
@@ -808,7 +809,7 @@ def test_client_home_broadband_group_routes_hybgzs(temp_clash_root):
         yaml.safe_dump(
             {
                 "proxies": [
-                    {"name": "🏠home-win-CF", "type": "vless", "server": "home.example.com", "port": 443},
+                    {"name": "🏠home-win-mesh", "type": "vless", "server": "127.0.0.1", "port": 10882},
                     {"name": "HK-Reality", "type": "vless", "server": "hk.example.com", "port": 443},
                 ]
             }
@@ -822,7 +823,7 @@ def test_client_home_broadband_group_routes_hybgzs(temp_clash_root):
     groups = {g["name"]: g for g in doc["proxy-groups"]}
     home = groups[sm.HOME_GROUP]
     assert home["type"] == "select"
-    assert home["proxies"] == ["🏠home-win-CF", "DIRECT"]
+    assert home["proxies"] == ["🏠home-win-mesh", "DIRECT"]
 
     rule = "DOMAIN-SUFFIX,hybgzs.com,%s" % sm.HOME_GROUP
     assert rule in doc["rules"]
@@ -837,7 +838,7 @@ def test_client_home_group_prefers_tagged_home_win(temp_clash_root):
         yaml.safe_dump(
             {
                 "proxies": [
-                    {"name": "[自建] 🏠home-win-CF", "type": "vless", "server": "home.example.com", "port": 443},
+                    {"name": "[自建] 🏠home-win-mesh", "type": "vless", "server": "127.0.0.1", "port": 10882},
                     {"name": "[自建] VLESS-Azure-Reality", "type": "vless", "server": "2.2.2.2", "port": 443},
                 ]
             }
@@ -846,7 +847,29 @@ def test_client_home_group_prefers_tagged_home_win(temp_clash_root):
     )
     doc = yaml.safe_load(engine.render_client_clash_config(fetch_remote=False))
     groups = {g["name"]: g for g in doc["proxy-groups"]}
-    assert groups[sm.HOME_GROUP]["proxies"] == ["[自建] 🏠home-win-CF", "DIRECT"]
+    assert groups[sm.HOME_GROUP]["proxies"] == ["[自建] 🏠home-win-mesh", "DIRECT"]
+
+
+def test_render_client_clash_config_home_win_mesh_rewritten_for_client(temp_clash_root):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
+    (temp_clash_root / "airports" / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": "[自建] 🏠home-win-mesh", "type": "vless", "server": "127.0.0.1", "port": 10882},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    doc = yaml.safe_load(engine.render_client_clash_config(fetch_remote=False))
+    proxies = {p["name"]: p for p in doc["proxies"]}
+    assert "[自建] 🏠home-win-mesh" in proxies
+    assert proxies["[自建] 🏠home-win-mesh"]["server"] == "10.144.144.10"
+    assert proxies["[自建] 🏠home-win-mesh"]["port"] == 8082
+    groups = {g["name"]: g for g in doc["proxy-groups"]}
+    assert groups[sm.HOME_GROUP]["proxies"] == ["[自建] 🏠home-win-mesh", "DIRECT"]
 
 
 def test_client_home_broadband_group_falls_back_to_direct_without_node(temp_clash_root):

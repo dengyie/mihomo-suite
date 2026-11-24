@@ -12,18 +12,22 @@ const OUT_JSON = process.env.OUT_JSON || "/tmp/scripts/after.json";
 const config = JSON.parse(fs.readFileSync(SUB_JSON, "utf8"));
 const code = fs.readFileSync(SCRIPT, "utf8");
 
-// Run main() inside a fresh context; get the transformed config back as JSON.
+// Run main() inside a fresh context; get the transformed config back as JSON, plus DEAD_NODES_3XUI.
 const script = new vm.Script(
   code +
-    "\n;var __cfg = JSON.parse(__CONFIG_JSON__); main(__cfg); JSON.stringify(__cfg);"
+    "\n;var __cfg = JSON.parse(__CONFIG_JSON__); main(__cfg); JSON.stringify({ out: __cfg, dead: [...DEAD_NODES_3XUI] });"
 );
 const ctx = { __CONFIG_JSON__: JSON.stringify(config), console };
 vm.createContext(ctx);
-const outJson = script.runInContext(ctx);
-const out = JSON.parse(outJson);
+const runResult = JSON.parse(script.runInContext(ctx));
+const out = runResult.out;
+const outJson = JSON.stringify(out);
 fs.writeFileSync(OUT_JSON, outJson);
 
-const exclude = new Set(JSON.parse(fs.readFileSync(process.env.EXCLUDE_JSON || "/tmp/scripts/exclude.json", "utf8")));
+const excludePath = process.env.EXCLUDE_JSON || "/tmp/scripts/exclude.json";
+const exclude = new Set(
+  fs.existsSync(excludePath) ? JSON.parse(fs.readFileSync(excludePath, "utf8")) : runResult.dead
+);
 const fail = [];
 const ok = (cond, msg) => { if (!cond) fail.push(msg); };
 
@@ -31,13 +35,14 @@ const outNames = new Set((out.proxies || []).map((p) => p?.name).filter(Boolean)
 
 // 1. all excluded names gone from proxies
 for (const n of exclude) ok(!outNames.has(n), `proxy still present: ${n}`);
+ok(!outNames.has("🏠home-win-CF") && !outNames.has("[自建] 🏠home-win-CF"), "legacy home-win-CF still present");
 
 // 2. expected survivors -- self-built nodes may carry the optional "[自建] " tag
 const SELF_TAG = "[自建] ";
 const mustHave = [
-  "VLESS-Huawei-SH-Reality", "[share] 🇺🇸US-Vmess2(Bwh)", "🏠home-win-CF",
+  "VLESS-Huawei-SH-Reality", "[share] 🇺🇸US-Vmess2(Bwh)", "🏠home-win-mesh",
   "[tomorin] [anytls]VN Hanoi VNPT", "AnyTLS-googlevps", "[share] 🇭🇰HK-Warp1(Sak)",
-  "[tomorin] US LAS Buyvm", "TUIC-Azure", "🇸🇬【亚洲】新加坡03丨直连",
+  "[tomorin] US LAS Buyvm", "TUIC-Azure", "🇺🇸PIGEONW-家宽-01",
 ];
 // self-built names carry "[自建] " + optional region flag; airport names keep their flag
 const stripTag = (n) => {
@@ -47,17 +52,23 @@ const stripTag = (n) => {
 for (const n of mustHave) {
   ok([...outNames].some((x) => stripTag(x) === n), `alive node missing: ${n}`);
 }
-// 49 proxies = 48 subscription survivors + 1 script-injected home-win-mesh
-ok(outNames.size === 49, `proxy count ${outNames.size} != 49`);
+// Every non-excluded input proxy must survive + injected home-win-mesh + NP_PIGEONW nodes
+const rawInputNames = new Set((config.proxies || []).map((p) => p?.name).filter(Boolean));
+for (const n of rawInputNames) {
+  if (!exclude.has(n)) ok(outNames.has(n), `non-excluded proxy dropped: ${n}`);
+}
+ok(outNames.size === 95, `proxy count ${outNames.size} != 95`);
 
-// 3. mesh node injected and first member of 🏠家宽
-const MESH = outNames.has(SELF_TAG + "🏠home-win-mesh") ? SELF_TAG + "🏠home-win-mesh" : "🏠home-win-mesh";
+// 3. mesh node injected and first member of 🏠家宽 (no CF fallback)
+const MESH = "🏠home-win-mesh";
 ok(outNames.has(MESH), "home-win-mesh not injected");
 const home = (out["proxy-groups"] || []).find((g) => g?.name === "🏠家宽");
 ok(home && Array.isArray(home.proxies) && home.proxies[0] === MESH, "家宽 group mesh-first broken");
+ok(home && !home.proxies.some((m) => m.includes("home-win-CF")), "家宽 group still references home-win-CF");
 
 // 4. no group references excluded names / no empty groups
 const groupNames = new Set((out["proxy-groups"] || []).map((g) => g?.name).filter(Boolean));
+ok(!groupNames.has("MangoCF"), "legacy MangoCF group still present");
 for (const g of out["proxy-groups"] || []) {
   const members = g.proxies || [];
   for (const m of members) {
@@ -70,7 +81,7 @@ for (const g of out["proxy-groups"] || []) {
 }
 
 // 5. expected member counts (snapshot-coupled: re-pin when sub.json is refreshed)
-const expectCounts = { PROXY: 50, AUTO: 47, "🎯Google": 7, "🎯Claude": 9, "🎯OpenAI": 8, MangoCF: 3, "🏠家宽": 3 };
+const expectCounts = { PROXY: 96, AUTO: 93, "🎯Google": 32, "🎯Claude": 33, "🎯OpenAI": 30, "🏠家宽": 2 };
 for (const [name, want] of Object.entries(expectCounts)) {
   const g = (out["proxy-groups"] || []).find((x) => x?.name === name);
   ok(g && (g.proxies || []).length === want, `group ${name}: ${(g && (g.proxies || []).length) || "missing"} != ${want}`);
@@ -81,7 +92,7 @@ const rules = out.rules || [];
 ok(rules.some((r) => /^MATCH,/.test(r)), "no MATCH rule");
 ok(rules.some((r) => r.includes("🎯Claude")), "claude rules lost");
 ok(rules.some((r) => r.includes("🎯OpenAI")), "openai rules lost");
-ok(rules.some((r) => r.includes("mangoqwq.com")), "mangoqwq rules lost");
+ok(!rules.some((r) => /MangoCF|mangoqwq\.com/i.test(r)), "legacy MangoCF/mangoqwq.com rule still present");
 ok(rules.some((r) => r.includes("🏠家宽")), "home broadband rules lost");
 
 if (fail.length) {
@@ -89,4 +100,4 @@ if (fail.length) {
   for (const f of fail) console.error("  - " + f);
   process.exit(1);
 }
-console.log(`HARNESS PASS: proxies=49, groups=${(out["proxy-groups"] || []).length}, rules=${rules.length}`);
+console.log(`HARNESS PASS: proxies=${outNames.size}, groups=${(out["proxy-groups"] || []).length}, rules=${rules.length}`);

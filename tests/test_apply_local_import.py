@@ -316,3 +316,183 @@ def test_atomic_write_keeps_original_when_replace_fails(tmp_path, monkeypatch):
 
     assert target.read_text(encoding="utf-8") == "original\n"
     assert [p.name for p in tmp_path.iterdir()] == ["config.yaml"]
+
+
+def test_pool_groups_sync_google_openai_claude(tmp_path):
+    target = tmp_path / "config.yaml"
+    initial_config = {
+        "proxies": [
+            _proxy(HK_TUIC, "104.208.65.233", 47931, "tuic"),
+            _proxy("[自建] 🇺🇸VLESS-AWS-Oregon-Reality", "32.189.158.231", 443),
+            _proxy("美国_BGP_A", "1.2.3.4", 443),
+        ],
+        "proxy-groups": [
+            {"name": "PROXY", "type": "select", "proxies": ["美国_BGP_A", "DIRECT"]},
+            {"name": "🎯Google", "type": "select", "proxies": ["美国_BGP_A"]},
+            {"name": "🎯OpenAI", "type": "select", "proxies": ["美国_BGP_A"]},
+        ],
+    }
+    target.write_text(yaml.safe_dump(initial_config))
+
+    pool_groups = {
+        "google": ["美国_BGP_A", "[自建] 🇺🇸VLESS-AWS-Oregon-Reality"],
+        "openai": ["美国_BGP_A", "[自建] 🇺🇸VLESS-AWS-Oregon-Reality"],
+        "claude": ["美国_BGP_A", "[自建] 🇺🇸VLESS-AWS-Oregon-Reality"],
+    }
+
+    pool_proxies = initial_config["proxies"]
+    data, _, _, _ = ali.build_data(
+        target, pool_proxies, set(), pool_proxies=pool_proxies, pool_groups=pool_groups
+    )
+
+    group_map = {g["name"]: g for g in data["proxy-groups"]}
+    assert "[自建] 🇺🇸VLESS-AWS-Oregon-Reality" in group_map["🎯Google"]["proxies"]
+    assert "[自建] 🇺🇸VLESS-AWS-Oregon-Reality" in group_map["🎯OpenAI"]["proxies"]
+    assert "🎯Claude" in group_map
+    assert "[自建] 🇺🇸VLESS-AWS-Oregon-Reality" in group_map["🎯Claude"]["proxies"]
+    assert group_map["🎯Claude"]["type"] == "select"
+
+
+def test_build_data_deduplicates_proxy_groups(tmp_path):
+    target = tmp_path / "config.yaml"
+    us_oregon = "[自建] 🇺🇸VLESS-AWS-Oregon-Reality"
+    initial_config = {
+        "proxies": [
+            _proxy(HK_TUIC, "104.208.65.233", 47931, "tuic"),
+            _proxy("[自建] 🇺🇸TUIC-googlevps", "1.2.3.4", 443),
+            _proxy(us_oregon, "32.189.158.231", 443),
+        ],
+        "proxy-groups": [
+            {"name": "PROXY", "type": "select", "proxies": ["[自建] 🇺🇸TUIC-googlevps", HK_TUIC, "[自建] 🇺🇸TUIC-googlevps", "DIRECT"]},
+            {"name": "AUTO", "type": "url-test", "proxies": [us_oregon, us_oregon]},
+        ],
+        "rules": ["MATCH,PROXY"],
+    }
+    target.write_text(yaml.safe_dump(initial_config))
+
+    data, _, _, _ = ali.build_data(target, [], set(), pool_proxies=[])
+    group_map = {g["name"]: g for g in data["proxy-groups"]}
+    assert group_map["PROXY"]["proxies"] == ["[自建] 🇺🇸TUIC-googlevps", HK_TUIC, "DIRECT"]
+    assert group_map["AUTO"]["proxies"] == [us_oregon]
+
+
+def test_build_data_cpa_clean_egress_puts_home_win_mesh_first(tmp_path):
+    target = tmp_path / "config.yaml"
+    initial_config = {
+        "proxies": [
+            _proxy(IN_MESH, "10.144.144.10", 8082),
+            _proxy("[自建] 🏠home-win-CF", "1.2.3.4", 443),
+        ],
+        "proxy-groups": [
+            {"name": "cpa-clean-egress", "type": "select", "proxies": ["[自建] 🏠home-win-CF", "PROXY", "DIRECT"]},
+        ],
+        "rules": ["MATCH,cpa-clean-egress"],
+    }
+    target.write_text(yaml.safe_dump(initial_config))
+
+    data, _, _, _ = ali.build_data(target, [], set(), pool_proxies=[])
+    cpa = next(g for g in data["proxy-groups"] if g["name"] == "cpa-clean-egress")
+    assert cpa["proxies"][0] == IN_MESH
+    assert cpa["proxies"][1] == "[自建] 🏠home-win-CF"
+
+
+
+
+# --- gateway-only relays (airports/gateway-relays.yaml) ---------------------
+TOKYO = "[自建] 🇯🇵VLESS-AWS-Tokyo-Reality"
+V6 = "[tomorin] HK LUCID TCP IPv6"
+SELF_V6 = "[自建] 🇺🇸Mesh-googlevps-EasyTier"
+
+
+def _relay_target(tmp_path):
+    target = tmp_path / "config.yaml"
+    target.write_text(yaml.safe_dump({
+        "proxies": [_proxy(TOKYO, "52.192.36.79", 443),
+                    _proxy(SELF_V6, "2600::1", 443)],
+        "proxy-groups": [{"name": "PROXY", "type": "select", "proxies": ["DIRECT"]}],
+        "rules": ["MATCH,PROXY"],
+    }, allow_unicode=True), encoding="utf-8")
+    return target
+
+
+def _relay_pool():
+    # V6 lives in the pool file but NOT in vps-import (IPv6-only, ipv6-skip)
+    return [_proxy(TOKYO, "52.192.36.79", 443),
+            _proxy(SELF_V6, "2600::1", 443),
+            _proxy(V6, "2001:db8::1", 443)]
+
+
+def test_gateway_relay_adds_pool_node_with_dialer_and_survives_sweep(tmp_path):
+    target = _relay_target(tmp_path)
+    imported = [_proxy(TOKYO, "52.192.36.79", 443), _proxy(SELF_V6, "2600::1", 443)]
+    relays = {V6: TOKYO, SELF_V6: TOKYO}
+    data, *_ = ali.build_data(target, imported, set(), _relay_pool(), gateway_relays=relays)
+    by = {p["name"]: p for p in data["proxies"]}
+    assert by[V6]["dialer-proxy"] == TOKYO
+    assert by[V6]["server"] == "2001:db8::1"
+    # self-built refresh must not wipe the gateway-only dialer
+    assert by[SELF_V6]["dialer-proxy"] == TOKYO
+    # never added to any group: production routing untouched
+    for g in data["proxy-groups"]:
+        assert V6 not in g["proxies"]
+
+
+def test_gateway_relay_is_idempotent(tmp_path):
+    target = _relay_target(tmp_path)
+    relays = {V6: TOKYO}
+    data, *_ = ali.build_data(target, [], set(), _relay_pool(), gateway_relays=relays)
+    target.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=120))
+    again, *_ = ali.build_data(target, [], set(), _relay_pool(), gateway_relays=relays)
+    assert yaml.safe_dump(again, allow_unicode=True, sort_keys=False, width=120) == target.read_text()
+
+
+def test_gateway_relay_skips_missing_dialer_disabled_and_unknown(tmp_path):
+    target = tmp_path / "config.yaml"
+    target.write_text(yaml.safe_dump({
+        "proxies": [_proxy("x", "1.1.1.1", 1)],
+        "proxy-groups": [{"name": "PROXY", "type": "select", "proxies": ["DIRECT"]}],
+    }, allow_unicode=True), encoding="utf-8")
+    relays = {V6: TOKYO, "[tomorin] nope": TOKYO}
+    data, *_ = ali.build_data(target, [], set(), _relay_pool(), gateway_relays=relays)
+    assert V6 not in _names(data)  # dialer absent from this config -> skip
+    data, *_ = ali.build_data(_relay_target(tmp_path), [], {V6}, _relay_pool(),
+                              gateway_relays={V6: TOKYO})
+    assert V6 not in _names(data)  # disabled wins
+
+
+def test_load_gateway_relays(tmp_path, monkeypatch):
+    monkeypatch.setattr(ali, "ROOT", tmp_path)
+    assert ali.load_gateway_relays() == {}
+    (tmp_path / "airports").mkdir()
+    (tmp_path / "airports" / "gateway-relays.yaml").write_text(yaml.safe_dump(
+        {"default-dialer": TOKYO, "relays": [V6, {"name": SELF_V6, "dialer": "other"}, "", 3]},
+        allow_unicode=True), encoding="utf-8")
+    assert ali.load_gateway_relays() == {V6: TOKYO, SELF_V6: "other"}
+
+
+def test_gateway_relay_new_node_never_joins_pool_groups(tmp_path):
+    target = tmp_path / "config.yaml"
+    target.write_text(yaml.safe_dump({
+        "proxies": [_proxy(TOKYO, "52.192.36.79", 443)],
+        "proxy-groups": [{"name": "🎯Google", "type": "select", "proxies": [TOKYO]}],
+    }, allow_unicode=True), encoding="utf-8")
+    data, *_ = ali.build_data(target, [], set(), _relay_pool(),
+                              pool_groups={"google": [SELF_V6, TOKYO]},
+                              gateway_relays={SELF_V6: TOKYO})
+    assert SELF_V6 in _names(data)
+    google = next(g for g in data["proxy-groups"] if g["name"] == "🎯Google")
+    assert google["proxies"] == [TOKYO]
+
+
+def test_gateway_relay_stays_out_of_groups_on_later_runs(tmp_path):
+    target = tmp_path / "config.yaml"
+    target.write_text(yaml.safe_dump({
+        "proxies": [_proxy(TOKYO, "52.192.36.79", 443)],
+        "proxy-groups": [{"name": "🎯Google", "type": "select", "proxies": [TOKYO]}],
+    }, allow_unicode=True), encoding="utf-8")
+    kw = dict(pool_groups={"google": [SELF_V6, TOKYO]}, gateway_relays={SELF_V6: TOKYO})
+    for _ in range(2):  # second run: the relayed node is already present
+        data, *_ = ali.build_data(target, [], set(), _relay_pool(), **kw)
+        target.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=120))
+    google = next(g for g in data["proxy-groups"] if g["name"] == "🎯Google")
+    assert google["proxies"] == [TOKYO]

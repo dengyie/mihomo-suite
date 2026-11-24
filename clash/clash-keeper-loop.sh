@@ -18,7 +18,7 @@ START="$DIR/start-clash.sh"
 INTERVAL=${INTERVAL:-120}      # 自检间隔秒
 LOG_MAX_MB=${LOG_MAX_MB:-50}   # mihomo.log 超过就瘦身
 LOG_KEEP_MB=${LOG_KEEP_MB:-10} # 瘦身后保留末尾
-BAK_RETAIN=${BAK_RETAIN:-20}   # 每族备份保留份数
+BAK_RETAIN=${BAK_RETAIN:-10}   # 每族自动备份保留份数
 GUARD_LOG_MAX_MB=${GUARD_LOG_MAX_MB:-5}
 
 # mihomo 自身出站不能走容器坏代理
@@ -53,7 +53,7 @@ shrink_in_place() {
   [ -f "$f" ] || return 0
   mb=$(( $(stat -c %s "$f") / 1048576 ))
   [ "$mb" -gt "$max" ] || return 0
-  local tmp="$f.shrink.$$"
+  local tmp="/tmp/$(basename "$f").shrink.$$"
   if tail -c "$(( keep * 1048576 ))" "$f" > "$tmp" 2>/dev/null; then
     cat "$tmp" > "$f" && say "瘦身 $(basename "$f"): ${mb}MB -> ${keep}MB"
   fi
@@ -68,16 +68,17 @@ shrink_in_place() {
 prune_backups() {
   local base fam n
   for base in config.yaml config.mac-merged.yaml; do
-    # 列出该 base 下所有备份族前缀 (.pre-health- / .pre-guard- / ...)
-    for fam in $(ls -1 "$DIR/$base".pre-* 2>/dev/null \
+    # 列出该 base 下自动备份族前缀 (.pre-health- / .pre-guard- / 纯时间戳 .bak-[0-9]*)
+    # 纯数字时间戳的 .bak-YYYYMMDD-HHMMSS 归入自动轮转, 带语义的命名人工快照(.bak-fixscope等)保留
+    for fam in $(ls -1 "$DIR/$base".pre-* "$DIR/$base".bak-[0-9]* 2>/dev/null \
                  | sed -E 's/[-_][0-9]{8}[-_T]?[0-9]{6}Z?$//' | sort -u); do
       n=$(ls -1dt "$fam"* 2>/dev/null | wc -l)
       [ "$n" -gt "$BAK_RETAIN" ] || continue
       ls -1dt "$fam"* 2>/dev/null | tail -n +$((BAK_RETAIN + 1)) | while read -r f; do
-        # 二次确认: 只删带 .pre-<族>-<时间戳> 的文件, 绝不碰活配置
+        # 二次确认: 只删带 .pre-<族>-<时间戳> 或 .bak-[0-9]* 纯时间戳备份, 绝不碰活配置与具名人工快照
         case "$f" in
           "$DIR/config.yaml"|"$DIR/config.mac-merged.yaml") ;;
-          *.pre-*) rm -f "$f" ;;
+          *.pre-*|*.bak-[0-9]*) rm -f "$f" ;;
         esac
       done
       say "prune $(basename "$fam") $n -> $BAK_RETAIN"
@@ -129,6 +130,9 @@ while true; do
 
   shrink_in_place "$LOG" "$LOG_MAX_MB" "$LOG_KEEP_MB"
   shrink_in_place "$DIR/hutao-bridge-guard.log" "$GUARD_LOG_MAX_MB" 1
+  for gw_log in /personal/zashboard/gateway*.log; do
+    shrink_in_place "$gw_log" 20 5
+  done
   prune_backups
 
   # 同理关掉 fd 9: sleep 是这里最长命的子进程, 孤儿化后最能拖延接班

@@ -30,9 +30,21 @@ CFG = CLASH_DIR / "config.yaml"
 MERGED = CLASH_DIR / "config.mac-merged.yaml"
 SECRET_FILE = CLASH_DIR / ".controller-secret"
 API = "http://127.0.0.1:9090"
-REPORT_DIR = Path("/personal/grok-register/output")
 DEFAULT_URL = "http://www.gstatic.com/generate_204"
 DEFAULT_TIMEOUT_MS = 5000
+
+
+def ensure_report_dir() -> Path:
+    cand = Path("/personal/grok-register/output")
+    try:
+        if cand.parent.is_symlink() and not cand.parent.exists():
+            raise FileNotFoundError("broken symlink")
+        cand.mkdir(parents=True, exist_ok=True)
+        return cand
+    except Exception:
+        fallback = CLASH_DIR / "report"
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
 GROUP_TYPES = {
     "Selector",
     "URLTest",
@@ -70,7 +82,7 @@ def bare_name(name: str) -> str:
 PREFERRED = (
     "TUIC-googlevps",
     "AnyTLS-googlevps",
-    "VLESS-CF-DLD",
+    "VLESS-AWS-Oregon-Reality",
 )
 
 
@@ -323,7 +335,7 @@ def main() -> int:
     for n in dead:
         print(f"  DEAD {results[n]['status'][:80]}  {n}")
 
-    REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    report_dir = ensure_report_dir()
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     report = {
         "ts": ts,
@@ -342,15 +354,15 @@ def main() -> int:
         ],
         "preferred_first": preferred_first,
     }
-    report_path = REPORT_DIR / f"clash_node_health_{ts}.json"
+    report_path = report_dir / f"clash_node_health_{ts}.json"
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    latest = REPORT_DIR / "clash_node_health_latest.json"
+    latest = report_dir / "clash_node_health_latest.json"
     latest.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     # plain list for PROXY_LIST / ops
-    (REPORT_DIR / "clash_nodes_healthy.txt").write_text(
+    (report_dir / "clash_nodes_healthy.txt").write_text(
         "\n".join(healthy) + ("\n" if healthy else ""), encoding="utf-8"
     )
-    (REPORT_DIR / "clash_nodes_dead.txt").write_text(
+    (report_dir / "clash_nodes_dead.txt").write_text(
         "\n".join(dead) + ("\n" if dead else ""), encoding="utf-8"
     )
     print(f"\nreport={report_path}")

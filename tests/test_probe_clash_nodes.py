@@ -30,14 +30,14 @@ def test_preferred_matches_live_canonical_names():
     live = [
         "[自建] 🇺🇸TUIC-googlevps",
         "[自建] 🇺🇸AnyTLS-googlevps",
-        "VLESS-CF-DLD",
+        "[自建] 🇺🇸VLESS-AWS-Oregon-Reality",
         "[自建] 🇭🇰TUIC-Azure",
     ]
     preferred_first = [n for n in live if pcn.bare_name(n) in pcn.PREFERRED]
     assert preferred_first == [
         "[自建] 🇺🇸TUIC-googlevps",
         "[自建] 🇺🇸AnyTLS-googlevps",
-        "VLESS-CF-DLD",
+        "[自建] 🇺🇸VLESS-AWS-Oregon-Reality",
     ]
 
 

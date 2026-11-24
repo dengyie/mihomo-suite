@@ -10,10 +10,15 @@ const vm = require("node:vm");
 const SCRIPT = process.env.SCRIPT_JS || "/Users/mango/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/profiles/Script.js";
 const SUB_JSON = process.env.SUB_JSON || "/tmp/scripts/sub.json";
 const config = JSON.parse(fs.readFileSync(SUB_JSON, "utf8"));
-const exclude = JSON.parse(fs.readFileSync(process.env.EXCLUDE_JSON || "/tmp/scripts/exclude.json", "utf8"));
+const code = fs.readFileSync(SCRIPT, "utf8");
+const excludePath = process.env.EXCLUDE_JSON || "/tmp/scripts/exclude.json";
+const exclude = fs.existsSync(excludePath)
+  ? JSON.parse(fs.readFileSync(excludePath, "utf8"))
+  : vm.runInNewContext(code + "\n;[...DEAD_NODES_3XUI];");
 
-// A node that the filter will remove.
-const deadName = exclude[0];
+// A node that the filter will remove (prefer one present in config.proxies, else first dead name).
+const rawSet = new Set((config.proxies || []).map((p) => p?.name).filter(Boolean));
+const deadName = exclude.find((n) => rawSet.has(n)) || exclude[0];
 const fail = [];
 const ok = (cond, msg) => { if (!cond) fail.push(msg); };
 
@@ -32,7 +37,6 @@ config["proxy-groups"].push({
   proxies: [deadName],
 });
 
-const code = fs.readFileSync(SCRIPT, "utf8");
 const script = new vm.Script(
   code + "\n;var __cfg = JSON.parse(__CONFIG_JSON__); main(__cfg); JSON.stringify(__cfg);"
 );

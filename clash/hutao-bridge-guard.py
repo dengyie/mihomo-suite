@@ -53,6 +53,7 @@ CANDIDATES = (
     "BK-🇺🇸【北美洲】美国03原生丨直连【2x】",
     "BK-🇺🇸【北美洲】美国04原生丨直连【2x】",
     "BK-🇺🇸【北美洲】美国01原生丨直连【2x】",
+    "[自建] 🇺🇸VLESS-AWS-Oregon-Reality",
     "TUIC-googlevps",
     "AnyTLS-googlevps",
     "[自建] 🇺🇸TUIC-googlevps",
@@ -60,7 +61,6 @@ CANDIDATES = (
     "🇺🇸【北美洲】美国03原生丨直连【2x】",
     "🇺🇸【北美洲】美国01原生丨直连【2x】",
     "[tomorin] US LAS Buyvm",
-    "[share] 🇺🇸US-Vmess1(Bwh)",
 )
 PROBE_URL = "http://www.gstatic.com/generate_204"
 PROBE_TIMEOUT_MS = 5000
