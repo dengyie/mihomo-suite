@@ -41,26 +41,20 @@ API = "http://127.0.0.1:9090"
 
 LISTENER_NAME = "hutao-us-xray-default"
 BRIDGE_PORT = 10818
-# 胡桃美国出口候选, 按优先级; D 为历史默认
-# 胡桃美国出口候选, 按优先级 (2026-11-02)。原 美国_BGP_* 系列为草莓机场节点,
-# 域名已撤服(api/lb.download.strawberrymemo.com 均无 A/AAAA), 全部不可达;
-# 换为经 delay 实测的优质美国出口: BK-美国原生 洛杉矶 linode 最快,
-# TUIC/AnyTLS-googlevps 为自建 Google VPS 最稳兜底。
+# 胡桃美国出口候选, 按优先级 (2026-11-24 收敛)。
+# hutao 上游查源 IP, 出口必须稳定且恒经 tebi 中继链(EasyTier mesh → Google VPS);
+# BK-美国×3 / 机场美国×2 / Bwh 在 tebi 已全部判死, 从组与候选表中清出。
+# 组保留 fallback 语义: TUIC 抖动自动切 AnyTLS, 两者同为 mesh 中继的 Google VPS 出口,
+# 源 IP 恒定 = 34.4.111.103 (The Dalles, Oregon)。
 CANDIDATES = (
-    # 2026-11-02: 优先用 fallback 组, 让 tebi/pxed 各自选本机可达的美国成员
-    # (pxed 侧 BK-美国01 不可达, 单节点写法会把 pxed 10818 打成 502)。
+    # 优先用 fallback 组, 让 tebi/pxed 各自选本机可达的美国成员
+    # (单节点写法会把 pxed 10818 打成 502)。
     "hutao-us-fallback",
-    "BK-🇺🇸【北美洲】美国03原生丨直连【2x】",
-    "BK-🇺🇸【北美洲】美国04原生丨直连【2x】",
-    "BK-🇺🇸【北美洲】美国01原生丨直连【2x】",
     "[自建] 🇺🇸VLESS-AWS-Oregon-Reality",
-    "TUIC-googlevps",
-    "AnyTLS-googlevps",
     "[自建] 🇺🇸TUIC-googlevps",
     "[自建] 🇺🇸AnyTLS-googlevps",
-    "🇺🇸【北美洲】美国03原生丨直连【2x】",
-    "🇺🇸【北美洲】美国01原生丨直连【2x】",
-    "[tomorin] US LAS Buyvm",
+    "TUIC-googlevps",
+    "AnyTLS-googlevps",
 )
 PROBE_URL = "http://www.gstatic.com/generate_204"
 PROBE_TIMEOUT_MS = 5000
