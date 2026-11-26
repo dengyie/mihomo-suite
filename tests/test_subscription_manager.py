@@ -36,6 +36,13 @@ parse_vmess_uri = sm.parse_vmess_uri
 main = sm.main
 
 
+@pytest.fixture(autouse=True)
+def _offline_self_direct_dns(monkeypatch):
+    """Render-time self-node DNS must never hit the network in tests."""
+    sm._SELF_DIRECT_DNS_CACHE.clear()
+    monkeypatch.setattr(sm, "_resolve_server_ips", lambda host: [])
+
+
 @pytest.fixture
 def temp_clash_root(tmp_path, monkeypatch):
     root = tmp_path / "clash_test"
@@ -799,7 +806,7 @@ def test_client_clash_export_webrtc_stun_and_media_rules_ordering(temp_clash_roo
     assert idx_media < idx_stun_domain
     assert idx_stun_domain < idx_cf
     assert idx_stun_port < idx_cf
-    assert sm.CLIENT_EXPORT_RENDER_REV == "15"
+    assert sm.CLIENT_EXPORT_RENDER_REV == "17"
 
 
 def test_client_home_broadband_group_routes_hybgzs(temp_clash_root):
@@ -1013,6 +1020,78 @@ def test_client_google_group_uses_simple_groups_list(temp_clash_root):
     google_group = {g["name"]: g for g in doc["proxy-groups"]}["🎯Google"]
     assert google_group["type"] == "select"
     assert google_group["proxies"] == ["Pinned-US"]
+
+
+def test_client_meta_group_mirrors_claude_and_never_direct(temp_clash_root):
+    """🎯Meta 专组 (2026-11-24): 成员对齐 Claude 同一美国选型; 规则零 DIRECT;
+    Facebook/Muse.ai 核心域名走 META 组; 本地覆写 (Script.js) 规则重建时
+    metaRules 白名单已透传, 源端规则不会被丢弃。"""
+    engine = SubscriptionEngine(root=temp_clash_root)
+    (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
+    (temp_clash_root / "airports" / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": "[自建] 🇺🇸TUIC-googlevps", "type": "tuic", "server": "us.example.com", "port": 443},
+                    {"name": "美国_BGP_A", "type": "anytls", "server": "bgp.example.com", "port": 443},
+                    {"name": "🇯🇵日本-直连", "type": "ss", "server": "jp.example.com", "port": 8388, "cipher": "aes-128-gcm", "password": "x"},
+                ],
+                "groups": {"claude": ["[自建] 🇺🇸TUIC-googlevps", "美国_BGP_A"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    yaml_text = engine.render_client_clash_config(fetch_remote=False)
+    doc = yaml.safe_load(yaml_text)
+    groups = {g["name"]: g for g in doc["proxy-groups"]}
+    # 组存在且 select
+    assert groups["🎯Meta"]["type"] == "fallback"
+    # 成员对齐 Claude (同一美国选型, 日本节点被排除)
+    assert groups["🎯Meta"]["proxies"] == groups["🎯Claude"]["proxies"]
+    assert "🇯🇵日本-直连" not in groups["🎯Meta"]["proxies"]
+    # 核心域名规则走 Meta 组
+    rules = doc["rules"]
+    for domain in ("facebook.com", "instagram.com", "whatsapp.com", "threads.net", "muse.ai", "meta.ai"):
+        assert f"DOMAIN-SUFFIX,{domain},🎯Meta" in rules
+    # Meta 规则零 DIRECT (用户硬约束: Facebook/Muse 渠道绝不本地直连)
+    meta_rules = [r for r in rules if r.endswith(",🎯Meta") or ",🎯Meta,no-resolve" in r]
+    assert meta_rules and all("DIRECT" not in r for r in meta_rules)
+    # IP 兜底在列且 no-resolve
+    assert "IP-CIDR,157.240.0.0/16,🎯Meta,no-resolve" in rules
+    assert "IP-CIDR6,2a03:2880::/29,🎯Meta,no-resolve" in rules
+
+
+def test_client_bare_aws_hidden_from_all_groups_but_defined(temp_clash_root):
+    """REV 16 (2026-11-24): AWS 裸节点保留定义(listeners/本地覆写引用), 但
+    PROXY/AUTO 等任何组都不暴露——本地 Script.js 以梯度 fallback 组替代。
+    """
+    engine = SubscriptionEngine(root=temp_clash_root)
+    (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
+    aws_jp = "[自建] 🇯🇵VLESS-AWS-Tokyo-Reality"
+    aws_us = "[自建] 🇺🇸VLESS-AWS-Oregon-Reality"
+    (temp_clash_root / "airports" / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": aws_jp, "type": "vless", "server": "10.144.144.3", "port": 443, "uuid": "x"},
+                    {"name": aws_us, "type": "vless", "server": "10.144.144.14", "port": 443, "uuid": "x"},
+                    {"name": "[自建] 🇺🇸TUIC-googlevps", "type": "tuic", "server": "us.example.com", "port": 443},
+                ],
+                "groups": {"claude": [aws_us, "[自建] 🇺🇸TUIC-googlevps"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    yaml_text = engine.render_client_clash_config(fetch_remote=False)
+    doc = yaml.safe_load(yaml_text)
+    # 定义仍在
+    names = {p["name"] for p in doc["proxies"]}
+    assert aws_jp in names and aws_us in names
+    # 任何组都不引用裸 AWS
+    for g in doc["proxy-groups"]:
+        assert aws_jp not in g.get("proxies", []), g["name"]
+        assert aws_us not in g.get("proxies", []), g["name"]
+    assert sm.CLIENT_EXPORT_RENDER_REV == "17"
 
 
 def test_skip_merge_subscription_stays_out_of_merged(temp_clash_root, monkeypatch):
@@ -2471,3 +2550,126 @@ def test_prune_local_node_file_never_drops_self_built(temp_clash_root, monkeypat
     assert airport not in kept        # airport node still pruned
     disabled = sm.load_disabled_nodes(engine.disabled_file)
     assert TAGGED_HK not in disabled
+
+
+# ---------------------------------------------------------------------------
+# REV 17 (2026-11-27): self-built DIRECT derivation + in-group failover
+# ---------------------------------------------------------------------------
+
+def test_derive_self_direct_cidrs_ip_domain_chain_private():
+    resolved = {"vps.example.com": ["8.8.4.4", "2001:db8::1", "10.0.0.5"]}
+    nodes = [
+        {"name": "[自建] 🇺🇸TUIC-googlevps", "server": "vps.example.com"},
+        {"name": "[自建] 🇭🇰TUIC-Azure", "server": "1.0.0.1"},
+        {"name": "[自建] 🇭🇰VLESS-Azure-Reality", "server": "1.0.0.1"},  # dedupe
+        {"name": "[自建] 🇺🇸PIGEONW-家宽-01", "server": "23.132.180.213",
+         "dialer-proxy": "[自建] 🇺🇸VLESS-AWS-Oregon-Reality"},  # chained: skip
+        {"name": "[自建] 🇯🇵VLESS-AWS-Tokyo-Reality", "server": "10.144.144.3"},  # mesh: LAN rule
+        {"name": "[自建] EasyTier-mesh-socks", "server": "127.0.0.1"},
+        {"name": "美国_BGP_A", "server": "1.2.3.4"},  # airport: not self-built
+        {"name": "[自建] v6", "server": "[2606:4700::1111]"},
+    ]
+    out = sm.derive_self_direct_cidrs(nodes, resolver=lambda h: resolved.get(h, []))
+    # 2001:db8::/32 is documentation space (not global) -> dropped like private
+    assert out == ["8.8.4.4/32", "1.0.0.1/32", "2606:4700::1111/128"]
+
+
+def test_derive_self_direct_cidrs_dns_failure_is_non_fatal():
+    nodes = [{"name": "[自建] x", "server": "nx.invalid"}]
+    assert sm.derive_self_direct_cidrs(nodes, resolver=lambda h: []) == []
+
+
+def test_resolve_server_ips_caches_and_swallows_errors(monkeypatch):
+    calls = []
+
+    def fake_getaddrinfo(host, port, proto=0):
+        calls.append(host)
+        if host == "bad.example":
+            raise socket.gaierror("nx")
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("8.8.4.4", 0))]
+
+    monkeypatch.setattr(sm, "_resolve_server_ips", sm.__dict__["_resolve_server_ips"])
+    real = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(real)
+    monkeypatch.setattr(real.socket, "getaddrinfo", fake_getaddrinfo)
+    assert real._resolve_server_ips("vps.example") == ["8.8.4.4"]
+    assert real._resolve_server_ips("vps.example") == ["8.8.4.4"]
+    assert calls.count("vps.example") == 1  # TTL cache hit
+    assert real._resolve_server_ips("bad.example") == []
+
+
+def test_build_client_direct_rules_places_cidrs_before_lan():
+    rules = sm.build_client_direct_rules(["8.8.4.4/32", "51.83.6.5/32", "2a11::1/128"])
+    lan = rules.index("GEOIP,LAN,DIRECT,no-resolve")
+    assert rules.index("IP-CIDR,8.8.4.4/32,DIRECT,no-resolve") < lan
+    assert rules.index("IP-CIDR6,2a11::1/128,DIRECT,no-resolve") < lan
+    assert rules.count("IP-CIDR,51.83.6.5/32,DIRECT,no-resolve") == 1  # static+derived dedupe
+    assert not any("35.212.179.13" in r for r in rules)
+
+
+def _rev17_local_nodes(root):
+    (root / "airports").mkdir(parents=True, exist_ok=True)
+    (root / "airports" / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": "[自建] 🇺🇸TUIC-googlevps", "type": "tuic", "server": "vps.example.com", "port": 47685},
+                    {"name": "[自建] 🇺🇸AnyTLS-googlevps", "type": "anytls", "server": "vps.example.com", "port": 60629},
+                    {"name": "美国_BGP_A", "type": "anytls", "server": "bgp.example.com", "port": 443},
+                    {"name": "[自建] 🇭🇰TUIC-Azure", "type": "tuic", "server": "1.0.0.1", "port": 47931},
+                ],
+                "groups": {
+                    "google": ["[自建] 🇺🇸TUIC-googlevps", "[自建] 🇺🇸AnyTLS-googlevps", "美国_BGP_A"],
+                    "claude": ["[自建] 🇺🇸TUIC-googlevps", "美国_BGP_A"],
+                    "openai": ["[自建] 🇺🇸TUIC-googlevps"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_client_export_derives_self_direct_rules_and_tun_exclude(temp_clash_root, monkeypatch):
+    monkeypatch.setattr(sm, "_resolve_server_ips",
+                        lambda h: ["8.8.4.4"] if h == "vps.example.com" else ["9.9.9.9"])
+    _rev17_local_nodes(temp_clash_root)
+    engine = SubscriptionEngine(root=temp_clash_root)
+    doc = yaml.safe_load(engine.render_client_clash_config(fetch_remote=False))
+    rules = doc["rules"]
+    assert "IP-CIDR,8.8.4.4/32,DIRECT,no-resolve" in rules
+    assert "IP-CIDR,1.0.0.1/32,DIRECT,no-resolve" in rules
+    assert "IP-CIDR,9.9.9.9/32,DIRECT,no-resolve" not in rules  # airport node never derived
+    assert not any("35.212.179.13" in r for r in rules)
+    # DIRECT IPs must precede every proxy rule so the loop never reaches MATCH
+    assert rules.index("IP-CIDR,8.8.4.4/32,DIRECT,no-resolve") < rules.index("MATCH,PROXY")
+    assert doc["tun"]["route-exclude-address"] == ["8.8.4.4/32", "1.0.0.1/32"]
+    assert sm.validate_client_clash_yaml(yaml.safe_dump(doc, allow_unicode=True)) == []
+
+
+def test_client_business_groups_fail_over_inside_curated_members(temp_clash_root):
+    _rev17_local_nodes(temp_clash_root)
+    engine = SubscriptionEngine(root=temp_clash_root)
+    doc = yaml.safe_load(engine.render_client_clash_config(fetch_remote=False))
+    groups = {g["name"]: g for g in doc["proxy-groups"]}
+    google = groups["🎯Google"]
+    assert google["type"] == "url-test"
+    assert google["url"] == "https://www.google.com/generate_204"
+    # members are exactly the curated list: no PROXY/AUTO/DIRECT/relay fallbacks
+    assert google["proxies"] == ["[自建] 🇺🇸TUIC-googlevps", "[自建] 🇺🇸AnyTLS-googlevps", "美国_BGP_A"]
+    claude = groups["🎯Claude"]
+    assert claude["type"] == "fallback"
+    assert claude["proxies"][0] == "[自建] 🇺🇸TUIC-googlevps"  # order = preference
+    # single-member group stays a plain select
+    assert groups["🎯OpenAI"]["type"] == "select"
+    assert groups["PROXY"]["type"] == "select"
+    assert groups["🏠家宽"]["type"] == "select"
+
+
+def test_client_export_fingerprint_tracks_self_node_ip_change(temp_clash_root, monkeypatch):
+    _rev17_local_nodes(temp_clash_root)
+    engine = SubscriptionEngine(root=temp_clash_root)
+    monkeypatch.setattr(sm, "_resolve_server_ips", lambda h: ["35.212.179.13"])
+    before = engine._client_export_inputs_fingerprint()
+    monkeypatch.setattr(sm, "_resolve_server_ips", lambda h: ["8.8.4.4"])
+    after = engine._client_export_inputs_fingerprint()
+    assert before != after

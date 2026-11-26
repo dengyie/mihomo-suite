@@ -59,7 +59,17 @@ CLIENT_EXPORT_TOKEN_MODE = 0o640
 # 2026-11-03: REV '12' - 自建节点统一 [自建] 前缀, 客户端导出跟随改名
 # 2026-11-03: REV '13' - 自建节点加地区国旗 (如 [自建] 🇭🇰TUIC-Azure)
 # 2026-11-10: REV '14' - 移除 MangoCF 策略组与 12 条 mangoqwq.com 规则(落入 MATCH,PROXY 兜底), 移除 🏠home-win-CF
-CLIENT_EXPORT_RENDER_REV = '15'  # 2026-11-24: +🎯Meta 组 (Facebook/Muse.ai 专组, REV 14→15)
+# 2026-11-24: REV '15' - +🎯Meta 组 (Facebook/Muse.ai 专组)
+# 2026-11-24: REV '16' - PROXY/AUTO 隐藏 AWS 裸节点, 保留定义供 listeners 引用
+# 2026-11-27: REV '17' - 自建节点直连 IP 渲染期自动推导 (DIRECT + tun.route-exclude-address),
+#   🎯Google 改 url-test(组内择优), 🎯Claude/🎯Meta/🎯OpenAI 改 fallback(组内顺序故障转移)
+CLIENT_EXPORT_RENDER_REV = '17'
+# 客户端订阅保留节点定义(本地 Merge.yaml listeners 等直接引用), 但不在任何
+# 组成员中暴露裸 AWS 节点——本地用 Script.js 的梯度 fallback 组替代它们。
+CLIENT_HIDE_FROM_GROUPS = frozenset({
+    '[自建] 🇯🇵VLESS-AWS-Tokyo-Reality',
+    '[自建] 🇺🇸VLESS-AWS-Oregon-Reality',
+})
 CLIENT_BUILTIN_OUTBOUNDS = frozenset({
     'DIRECT', 'REJECT', 'REJECT-DROP', 'PASS', 'COMPATIBLE', 'GLOBAL',
 })
@@ -156,12 +166,100 @@ CLIENT_DIRECT_RULES = [
     'DOMAIN-SUFFIX,cloudflare.com,DIRECT',
     'DOMAIN-SUFFIX,kryptex.network,DIRECT',
     'DOMAIN-SUFFIX,kryptex.com,DIRECT',
-    'IP-CIDR,104.208.65.233/32,DIRECT,no-resolve',
-    'IP-CIDR,35.212.179.13/32,DIRECT,no-resolve',
-    'IP-CIDR,51.83.6.5/32,DIRECT,no-resolve',
-    'IP-CIDR,45.202.199.205/32,DIRECT,no-resolve',
     'GEOIP,LAN,DIRECT,no-resolve',
 ]
+# 非池内节点但需直连的固定入口 (KataBump 落地 / 旧 Azure 面板入口)。
+# 自建节点 server 不再手写: 渲染期由 derive_self_direct_cidrs() 自动推导,
+# 2026-11-27 事故: googlevps 换 IP (35.212.179.13 -> 34.4.111.103) 后手写清单
+# 未同步, TUN 回环导致自建节点全挂。
+CLIENT_STATIC_DIRECT_CIDRS = ['51.83.6.5/32', '45.202.199.205/32']
+SELF_DIRECT_DNS_TTL_SEC = 600
+_SELF_DIRECT_DNS_CACHE: Dict[str, Tuple[float, List[str]]] = {}
+
+
+def _resolve_server_ips(host: str) -> List[str]:
+    """Resolve a node server domain to public IPs (A + AAAA), TTL-cached.
+
+    Failure returns [] (the DIRECT rule is simply omitted; rendering never
+    blocks on DNS).
+    """
+    import time
+    now = time.monotonic()
+    hit = _SELF_DIRECT_DNS_CACHE.get(host)
+    if hit and now - hit[0] < SELF_DIRECT_DNS_TTL_SEC:
+        return list(hit[1])
+    ips: List[str] = []
+    try:
+        for info in socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP):
+            ip = str(info[4][0]).split('%', 1)[0]
+            if ip not in ips:
+                ips.append(ip)
+    except (OSError, UnicodeError) as e:
+        _LOG.warning('self-direct: resolve %s failed: %s', host, e)
+        # stale-but-known beats nothing: a transient DNS blip must not drop
+        # the DIRECT rule (that is exactly the TUN-loop failure mode)
+        return list(hit[1]) if hit else []
+    if ips:
+        _SELF_DIRECT_DNS_CACHE[host] = (now, ips)
+    return ips
+
+
+def derive_self_direct_cidrs(
+    proxies: List[Dict[str, Any]],
+    resolver=None,
+) -> List[str]:
+    """/32 and /128 CIDRs of every self-built node that is dialed directly.
+
+    Under Verge TUN (auto-route + fake-ip) the kernel's own dial to a
+    self-built server can be re-captured and sent through MATCH,PROXY; a
+    DIRECT IP-CIDR rule plus tun.route-exclude-address breaks the loop.
+    Chained nodes (dialer-proxy) never touch the TUN directly and private /
+    loopback / mesh addresses are already covered by GEOIP,LAN. Domains are
+    resolved here (server side) so an IP change is picked up on the next
+    render instead of requiring a hand-edited list.
+    """
+    resolve = resolver or _resolve_server_ips
+    out: List[str] = []
+    for node in proxies:
+        if not isinstance(node, dict):
+            continue
+        if not str(node.get('name') or '').startswith(SELF_TAG):
+            continue
+        if node.get('dialer-proxy') or node.get('dialer_proxy'):
+            continue
+        server = str(node.get('server') or '').strip().strip('[]')
+        if not server:
+            continue
+        try:
+            candidates = [str(ipaddress.ip_address(server))]
+        except ValueError:
+            candidates = resolve(server)
+        for raw in candidates:
+            try:
+                ip = ipaddress.ip_address(raw)
+            except ValueError:
+                continue
+            if not ip.is_global:
+                continue
+            cidr = f'{ip}/{32 if ip.version == 4 else 128}'
+            if cidr not in out:
+                out.append(cidr)
+    return out
+
+
+def build_client_direct_rules(self_cidrs: List[str]) -> List[str]:
+    """CLIENT_DIRECT_RULES with static + derived IP-CIDR rules before GEOIP,LAN."""
+    cidrs: List[str] = []
+    for c in list(CLIENT_STATIC_DIRECT_CIDRS) + list(self_cidrs):
+        if c not in cidrs:
+            cidrs.append(c)
+    ip_rules = [
+        ('IP-CIDR6' if ':' in c else 'IP-CIDR') + f',{c},DIRECT,no-resolve'
+        for c in cidrs
+    ]
+    head = [r for r in CLIENT_DIRECT_RULES if not r.startswith('GEOIP,')]
+    tail = [r for r in CLIENT_DIRECT_RULES if r.startswith('GEOIP,')]
+    return head + ip_rules + tail
 
 # 2026-10-23: 国内家宽出口分组。仅保留 🏠home-win-mesh(上海移动家宽 EasyTier Mesh直连), DIRECT 兜底。
 # 新增要走家宽的站点只需往 CLIENT_HOME_BROADBAND_SUFFIXES 追加后缀, 渲染时自动展开成规则。
@@ -619,6 +717,31 @@ CLIENT_TUN = {
     'auto-route': True,
     'auto-detect-interface': True,
 }
+
+CLIENT_GOOGLE_TEST_URL = 'https://www.google.com/generate_204'
+CLIENT_GROUP_TEST_URL = 'http://www.gstatic.com/generate_204'
+
+
+def _business_group(name: str, gtype: str, members: List[str],
+                    url: str = CLIENT_GROUP_TEST_URL) -> Dict[str, Any]:
+    """Curated business group with in-group failover only.
+
+    A single-member list (or the ['PROXY'] fallback) stays a plain select:
+    a health-checked group of one adds probes without adding failover.
+    """
+    if gtype == 'select' or len(members) < 2:
+        return {'name': name, 'type': 'select', 'proxies': members}
+    group: Dict[str, Any] = {
+        'name': name,
+        'type': gtype,
+        'url': url,
+        'interval': 300,
+        'lazy': False,
+        'proxies': members,
+    }
+    if gtype == 'url-test':
+        group['tolerance'] = 50
+    return group
 
 FETCH_MAX_BYTES = 8 * 1024 * 1024
 NODE_PROBE_TIMEOUT_SEC = 1.5
@@ -2735,6 +2858,12 @@ class SubscriptionEngine:
         simple_groups = load_local_node_groups(self.local_nodes_file)
         # AUTO(url-test) 排除池文件 groups.auto-exclude 声明的节点(如链路被干扰的 AnyTLS-googlevps),select 组保留全量
         auto_excluded = set(simple_groups.get('auto-exclude') or [])
+        # 2026-11-24 REV 16: 裸 AWS 节点保留定义但任何组不暴露(本地以梯度组替代)。
+        # available 同步剔除: 显式清单(groups.claude 等)误写裸节点也会被 resolve_simple_group 过滤。
+        group_hidden = CLIENT_HIDE_FROM_GROUPS & available
+        if group_hidden:
+            available = available - group_hidden
+            names = [n for n in names if n not in group_hidden] or ['DIRECT']
         auto_members = [n for n in names if n not in auto_excluded] or ['DIRECT']
         select_members = ['AUTO'] + names + ['DIRECT']
         google_fallback = [n for n in names if _is_us_google_node(n)]
@@ -2776,6 +2905,11 @@ class SubscriptionEngine:
             elif bare in available:
                 home_members.append(bare)
         home_members = home_members or ['DIRECT']
+        self_cidrs = derive_self_direct_cidrs(proxies)
+        tun = dict(CLIENT_TUN)
+        tun['route-exclude-address'] = list(self_cidrs) or []
+        if not tun['route-exclude-address']:
+            tun.pop('route-exclude-address')
         doc: Dict[str, Any] = {
             'mixed-port': 7897,
             'allow-lan': client_allow_lan(),
@@ -2783,7 +2917,7 @@ class SubscriptionEngine:
             'log-level': 'info',
             'ipv6': True,
             'unified-delay': True,
-            'tun': dict(CLIENT_TUN),
+            'tun': tun,
             'dns': dict(CLIENT_DNS),
             'proxies': proxies,
             'proxy-groups': [
@@ -2800,26 +2934,14 @@ class SubscriptionEngine:
                     'tolerance': 50,
                     'proxies': auto_members,
                 },
-                {
-                    'name': GOOGLE_GROUP,
-                    'type': 'select',
-                    'proxies': google_members,
-                },
-                {
-                    'name': CLAUDE_GROUP,
-                    'type': 'select',
-                    'proxies': claude_members,
-                },
-                {
-                    'name': META_GROUP,
-                    'type': 'select',
-                    'proxies': meta_members,
-                },
-                {
-                    'name': OPENAI_GROUP,
-                    'type': 'select',
-                    'proxies': openai_members,
-                },
+                # 2026-11-27 REV 17: 业务组成员是人工优选清单, 只在组内故障转移,
+                # 不引入组外兜底。Google 按延迟择优; Claude/Meta/OpenAI 风控敏感,
+                # fallback 按清单顺序粘住首个可用节点, 仅其失效时才切换出口 IP。
+                _business_group(GOOGLE_GROUP, 'url-test', google_members,
+                                CLIENT_GOOGLE_TEST_URL),
+                _business_group(CLAUDE_GROUP, 'fallback', claude_members),
+                _business_group(META_GROUP, 'fallback', meta_members),
+                _business_group(OPENAI_GROUP, 'fallback', openai_members),
                 {
                     'name': HOME_GROUP,
                     'type': 'select',
@@ -2829,7 +2951,7 @@ class SubscriptionEngine:
             'rules': (
                 list(CLIENT_DOMESTIC_MEDIA_RULES)
                 + list(CLIENT_STUN_RULES)
-                + list(CLIENT_DIRECT_RULES)
+                + build_client_direct_rules(self_cidrs)
                 + list(CLIENT_HOME_BROADBAND_RULES)
                 + list(CLIENT_CLAUDE_RULES)
                 + list(CLIENT_META_RULES)
@@ -2886,8 +3008,19 @@ class SubscriptionEngine:
             'local=' + sha256_file(self.local_nodes_file),
             'merged=' + sha256_file(self.merged_output_file),
             'disabled=' + sha256_file(self.disabled_file),
+            # 自建域名节点换 IP 时输入文件不变, 把推导结果纳入指纹才会重渲染
+            'self-direct=' + ','.join(self._self_direct_cidrs_for_fingerprint()),
         ]
         return sha256_text('\n'.join(parts))
+
+    def _self_direct_cidrs_for_fingerprint(self) -> List[str]:
+        disabled = load_disabled_nodes(self.disabled_file)
+        try:
+            nodes = [n for n in self._load_local_nodes()
+                     if str(n.get('name') or '').strip() not in disabled]
+        except Exception:
+            return []
+        return derive_self_direct_cidrs(nodes)
 
     def _load_client_export_meta(self) -> Dict[str, Any]:
         path = self.client_export_meta_file
