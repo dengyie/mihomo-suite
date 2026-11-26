@@ -237,11 +237,15 @@ def test_candidate_config(candidate_path: Path) -> Tuple[bool, str]:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            timeout=10,
+            timeout=120,
         )
         if res.returncode == 0:
             return True, ""
         return False, (res.stderr or res.stdout).strip()
+    except subprocess.TimeoutExpired:
+        # mihomo -t 在 pxed 负载尖峰下实测可达 ~48s（2026-11-14 误判教训）：
+        # 超时是「假失败」应提示重试，与真语法错误区分。
+        return False, "mihomo -t validation timed out after 120s (likely transient load; retry)"
     except Exception as e:
         return False, str(e)
 
