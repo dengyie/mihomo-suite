@@ -32,7 +32,7 @@
 # Env
 #   DEPLOY_HOST   ssh target that owns the shared mount (default: tebi)
 #   REMOTE_ROOT   remote zashboard root                 (default: /personal/zashboard)
-#   PXED_SSH      ssh target for the pxed supervisor    (default: root@10.144.144.31)
+#   PXED_SSH      (RETIRED 2026-11-26: pxed 报废销毁，此变量不再有默认值；显式设置也只会失败)
 #   RESTART_CMD   override the supervisorctl restart command entirely
 #
 set -euo pipefail
@@ -43,7 +43,7 @@ GATEWAY="$REPO_ROOT/zashboard/gateway.py"
 
 HOST=${DEPLOY_HOST:-tebi}
 REMOTE_ROOT=${REMOTE_ROOT:-/personal/zashboard}
-PXED_SSH=${PXED_SSH:-root@10.144.144.31}
+PXED_SSH=${PXED_SSH:-}
 RESTART=1
 DRY_RUN=0
 
@@ -204,11 +204,8 @@ if [ "$RESTART" = 1 ]; then
     log "gateway.py unchanged — no restart needed (static bundle only)"
   else
     restart_host "$HOST" "$HOST"
-    if ssh -o BatchMode=yes -o ConnectTimeout=8 "$PXED_SSH" true 2>/dev/null; then
-      restart_host "$PXED_SSH" "pxed"
-    else
-      warn "pxed unreachable at $PXED_SSH — restart it manually: supervisorctl restart zashboard-gateway"
-    fi
+    # 2026-11-26 pxed 报废销毁，peer 重启分支移除（原 ssh $PXED_SSH 逻辑）。
+    # 新宿主 tencent-lh 的 zashboard-gateway 如需重启请另行 SSH 操作。
   fi
 fi
 

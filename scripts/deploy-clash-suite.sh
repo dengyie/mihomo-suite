@@ -174,7 +174,7 @@ cat <<EOF
   at load time, so restart it for the lock change to take effect:
 
     ssh $HOST supervisorctl restart zashboard-gateway
-    ssh root@10.144.144.31 'supervisorctl -s unix:///personal/pxed/supervisor.sock restart zashboard-gateway'
+    # (pxed peer removed 2026-11-26: pxed 报废销毁，无需再重启对端)
 
   Roll back any file with:  mv <file>.pre-deploy-$TS <file>
 EOF

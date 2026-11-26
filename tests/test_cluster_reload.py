@@ -66,8 +66,13 @@ def test_is_pxed_host_detection(monkeypatch):
 def test_get_remote_node_ip(mock_clash_env):
     _, _, personal_root = mock_clash_env
     # Default fallbacks when no internal-ip file
-    assert cluster_reload.get_remote_node_ip("pxed") == "10.5.103.87"
-    assert cluster_reload.get_remote_node_ip("tebi") == "10.5.103.26"
+    # pxed retired 2026-11-26: fast-fail address
+    assert cluster_reload.get_remote_node_ip("pxed") == "0.0.0.0"
+    # tebi: mesh address preferred when reachable, Bohrium LAN as fallback
+    with patch.object(cluster_reload, "_mesh_reachable", return_value=True):
+        assert cluster_reload.get_remote_node_ip("tebi") == "10.144.144.32"
+    with patch.object(cluster_reload, "_mesh_reachable", return_value=False):
+        assert cluster_reload.get_remote_node_ip("tebi") == "10.5.103.26"
     assert cluster_reload.get_remote_node_ip("other") == "127.0.0.1"
 
     # From internal-ip file
@@ -111,12 +116,12 @@ def test_reload_remote_peer_success(mock_clash_env, monkeypatch):
         assert res["success"] is True
         assert res["status"] == 204
         assert res["peer_node"] == "pxed"
-        assert res["peer_ip"] == "10.5.103.87"
+        assert res["peer_ip"] == "0.0.0.0"
         assert res["error"] is None
 
         req = mock_urlopen.call_args[0][0]
         assert req.get_method() == "PUT"
-        assert req.full_url == "http://10.5.103.87:2053/panel/api/configs?force=true"
+        assert req.full_url == "http://0.0.0.0:2053/panel/api/configs?force=true"
         assert req.get_header("Authorization") == "Bearer test-panel-password"
 
 

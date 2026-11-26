@@ -43,7 +43,12 @@ def is_pxed_host() -> bool:
 
 
 def get_remote_node_ip(target_node: str, personal_dir: Optional[Path] = None) -> str:
-    """Resolve internal IP for peer node."""
+    """Resolve internal IP for peer node.
+
+    2026-11-25 去 Bohrium 内网 IP 依赖（pxed 容器半死事故沉淀）：mesh 地址
+    （EasyTier 10.144.144.x）优先——跨容器稳定、不随 Bohrium 调度变化；
+    10.5.103.x Bohrium 内网 IP 降级为兜底（mesh 断时容器间仍可能内网互通）。
+    """
     base = personal_dir or PERSONAL_ROOT
     ip_file = base / target_node / 'internal-ip'
     if ip_file.exists():
@@ -54,10 +59,21 @@ def get_remote_node_ip(target_node: str, personal_dir: Optional[Path] = None) ->
         except Exception:
             pass
     if target_node == 'pxed':
-        return '10.5.103.87'
+        # 2026-11-26 pxed 报废销毁：peer 不复存在，返回 0.0.0.0 快速失败
+        # （原 10.144.144.31 / 10.5.103.87 均已死，勿再回填）。
+        return '0.0.0.0'
     if target_node == 'tebi':
-        return '10.5.103.26'
+        return '10.144.144.32' if _mesh_reachable('10.144.144.32') else '10.5.103.26'
     return '127.0.0.1'
+
+
+def _mesh_reachable(ip: str, port: int = 2053, timeout: float = 1.5) -> bool:
+    """Probe mesh IP TCP reachability (gateway port) before preferring it."""
+    try:
+        with socket.create_connection((ip, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 def get_controller_secret() -> str:

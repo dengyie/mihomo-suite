@@ -157,7 +157,10 @@ def get_remote_node_ip(target_node: str) -> str:
         except Exception:
             pass
     if target_node == 'pxed':
-        return '10.5.103.87'
+        # 2026-11-26 pxed 报废销毁（Bohrium 容器连接面冻结，实例已回收）：
+        # 返回 0.0.0.0 让 _forward_remote_http 连接秒失败（快速失败），
+        # 不再指向 10.5.103.87 / 10.144.144.31 死地址造成 1.5s+ 超时挂起。
+        return '0.0.0.0'
     if target_node == 'tebi':
         return '10.5.103.26'
     return '127.0.0.1'
