@@ -84,7 +84,7 @@ for (const g of out["proxy-groups"] || []) {
 // 5. expected member counts (snapshot-coupled: re-pin when sub.json is refreshed)
 // REV 18: 🎯Claude/🎯OpenAI/🎯Meta merged into 🎯美国; per-host gradients are hidden fallbacks.
 const US = "🎯美国";
-const expectCounts = JSON.parse(process.env.EXPECT_COUNTS || "null") || { PROXY: 112, "🎯Google": 31, [US]: 30, "🏠家宽": 2 };
+const expectCounts = JSON.parse(process.env.EXPECT_COUNTS || "null") || { PROXY: 114, "🎯Google": 31, [US]: 30, "🏠家宽": 2 };
 for (const [name, want] of Object.entries(expectCounts)) {
   const g = (out["proxy-groups"] || []).find((x) => x?.name === name);
   ok(g && (g.proxies || []).length === want, `group ${name}: ${(g && (g.proxies || []).length) || "missing"} != ${want}`);
