@@ -68,7 +68,9 @@ CLIENT_EXPORT_TOKEN_MODE = 0o640
 #   PROXY/AUTO/业务组内同主机裸节点折叠为该梯度组
 # 2026-11-27: REV '19' - 裸 AWS(CLIENT_HIDE_FROM_GROUPS)回到 PROXY 全量手选, 仍不进 AUTO/业务组
 # 2026-11-27: REV '20' - mesh 克隆钉住公网 SNI/ws Host; 梯度组跳过 CLIENT_HIDE_FROM_GROUPS 节点
-CLIENT_EXPORT_RENDER_REV = '20'
+# 2026-11-27: REV '21' - 梯度组 60s 探测 + max-failed-times 2: 客户端出境 UDP 被丢时
+#   尽快切到 TCP/EasyTier mesh, 不再卡在已死的 TUIC 上等 120s 周期探测
+CLIENT_EXPORT_RENDER_REV = '21'
 # 客户端订阅保留节点定义(本地 Merge.yaml listeners 等直接引用); 裸 AWS 节点不进
 # AUTO/业务组(本地 Script.js 以梯度 fallback 组替代), REV 19 起仅在 PROXY 全量手选中暴露。
 CLIENT_HIDE_FROM_GROUPS = frozenset({
@@ -761,7 +763,9 @@ def _business_group(name: str, gtype: str, members: List[str],
 MESH_GRADIENTS_FILE_NAME = 'mesh-gradients.yaml'
 MESH_VARIANT_SUFFIX = '·mesh'
 MESH_DEFAULT_DIALER = SELF_TAG + 'EasyTier-mesh-socks'
-GRADIENT_PROBE_INTERVAL = 120
+GRADIENT_PROBE_INTERVAL = 60
+# 连续拨号失败达到该次数即立即重测(mihomo 默认 5), 失效成员秒级让位给下一梯度。
+GRADIENT_MAX_FAILED_TIMES = 2
 
 
 def load_mesh_gradients(path: Path) -> List[Dict[str, Any]]:
@@ -900,6 +904,7 @@ def build_self_gradients(
             'hidden': True,
             'url': CLIENT_GROUP_TEST_URL,
             'interval': GRADIENT_PROBE_INTERVAL,
+            'max-failed-times': GRADIENT_MAX_FAILED_TIMES,
             'lazy': False,
             'proxies': members,
         })

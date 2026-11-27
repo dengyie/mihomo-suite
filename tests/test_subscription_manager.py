@@ -2936,7 +2936,23 @@ def test_load_mesh_gradients_tolerates_bad_file(tmp_path):
 
 def test_client_export_render_rev_pinned():
     """唯一的 REV 钉子: 改了客户端渲染形状就在这里同步 bump(会使客户端缓存失效)。"""
-    assert sm.CLIENT_EXPORT_RENDER_REV == "20"
+    assert sm.CLIENT_EXPORT_RENDER_REV == "21"
+
+
+def test_gradient_group_fails_over_fast():
+    """REV 21: 梯度组 60s 探测 + 连续 2 次拨号失败即触发重测, UDP 被丢时尽快切 TCP/mesh。"""
+    proxies = [
+        {"name": "t", "type": "tuic", "server": "vps.example.com", "port": 1},
+        {"name": "a", "type": "anytls", "server": "vps.example.com", "port": 2},
+        {"name": "[自建] EasyTier-mesh-socks", "type": "socks5", "server": "127.0.0.1", "port": 3},
+    ]
+    spec = [{"name": "g-梯度", "mesh_server": "10.0.0.4", "members": ["a", "t"],
+             "mesh_only": [], "dialer": "[自建] EasyTier-mesh-socks"}]
+    _, groups, _ = sm.build_self_gradients(spec, proxies)
+    g = groups[0]
+    assert g["type"] == "fallback" and g["interval"] == 60 and g["max-failed-times"] == 2
+    # 声明序即偏好序: TCP 在前, UDP 其次, mesh 克隆兜底
+    assert g["proxies"] == ["a", "t", "a·mesh"]
 
 
 # ---------------------------------------------------------------- REV 20 mesh clone identity
