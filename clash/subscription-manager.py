@@ -66,9 +66,10 @@ CLIENT_EXPORT_TOKEN_MODE = 0o640
 # 2026-11-27: REV '18' - 精简暴露组: 🎯Claude/🎯Meta/🎯OpenAI 合并为 🎯美国, AUTO 隐藏;
 #   每台自建主机一个隐藏梯度 fallback 组(公网变体 -> EasyTier mesh 兜底, 见 mesh-gradients.yaml),
 #   PROXY/AUTO/业务组内同主机裸节点折叠为该梯度组
-CLIENT_EXPORT_RENDER_REV = '18'
-# 客户端订阅保留节点定义(本地 Merge.yaml listeners 等直接引用), 但不在任何
-# 组成员中暴露裸 AWS 节点——本地用 Script.js 的梯度 fallback 组替代它们。
+# 2026-11-27: REV '19' - 裸 AWS(CLIENT_HIDE_FROM_GROUPS)回到 PROXY 全量手选, 仍不进 AUTO/业务组
+CLIENT_EXPORT_RENDER_REV = '19'
+# 客户端订阅保留节点定义(本地 Merge.yaml listeners 等直接引用); 裸 AWS 节点不进
+# AUTO/业务组(本地 Script.js 以梯度 fallback 组替代), REV 19 起仅在 PROXY 全量手选中暴露。
 CLIENT_HIDE_FROM_GROUPS = frozenset({
     '[自建] 🇯🇵VLESS-AWS-Tokyo-Reality',
     '[自建] 🇺🇸VLESS-AWS-Oregon-Reality',
@@ -3000,6 +3001,9 @@ class SubscriptionEngine:
         # 2026-11-24 REV 16: 裸 AWS 节点保留定义但任何组不暴露(本地以梯度组替代)。
         # available 同步剔除: 显式清单(groups.claude 等)误写裸节点也会被 resolve_simple_group 过滤。
         group_hidden = CLIENT_HIDE_FROM_GROUPS & available
+        # REV 19: PROXY 是全量手选入口, 裸 AWS(已走 mesh dialer, 可用)回到 PROXY;
+        # 仍不进 AUTO 与业务组(🎯Google/🎯美国 为人工优选清单)。
+        select_names = list(names)
         if group_hidden:
             available = available - group_hidden
             names = [n for n in names if n not in group_hidden] or ['DIRECT']
@@ -3008,7 +3012,7 @@ class SubscriptionEngine:
         proxies.extend(gradient_nodes)
         auto_members = collapse_to_gradients(
             [n for n in names if n not in auto_excluded], gradient_of) or ['DIRECT']
-        select_members = ['AUTO'] + collapse_to_gradients(names, gradient_of) + ['DIRECT']
+        select_members = ['AUTO'] + collapse_to_gradients(select_names, gradient_of) + ['DIRECT']
         google_fallback = [n for n in names if _is_us_google_node(n)]
         google_members = resolve_simple_group(
             simple_groups,

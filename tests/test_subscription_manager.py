@@ -806,7 +806,7 @@ def test_client_clash_export_webrtc_stun_and_media_rules_ordering(temp_clash_roo
     assert idx_media < idx_stun_domain
     assert idx_stun_domain < idx_cf
     assert idx_stun_port < idx_cf
-    assert sm.CLIENT_EXPORT_RENDER_REV == "18"
+    assert sm.CLIENT_EXPORT_RENDER_REV == "19"
 
 
 def test_client_home_broadband_group_routes_hybgzs(temp_clash_root):
@@ -1086,9 +1086,9 @@ def test_client_us_group_prefers_explicit_us_list(temp_clash_root):
     assert us["proxies"] == ["美国_BGP_B", "美国_BGP_A"]
 
 
-def test_client_bare_aws_hidden_from_all_groups_but_defined(temp_clash_root):
-    """REV 16 (2026-11-24): AWS 裸节点保留定义(listeners/本地覆写引用), 但
-    PROXY/AUTO 等任何组都不暴露——本地 Script.js 以梯度 fallback 组替代。
+def test_client_bare_aws_only_in_proxy_select(temp_clash_root):
+    """REV 16 (2026-11-24): AWS 裸节点保留定义, 不进 AUTO/业务组。
+    REV 19 (2026-11-27): PROXY 是全量手选入口, 裸 AWS(mesh dialer 可用)回到 PROXY。
     """
     engine = SubscriptionEngine(root=temp_clash_root)
     (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
@@ -1112,11 +1112,15 @@ def test_client_bare_aws_hidden_from_all_groups_but_defined(temp_clash_root):
     # 定义仍在
     names = {p["name"] for p in doc["proxies"]}
     assert aws_jp in names and aws_us in names
-    # 任何组都不引用裸 AWS
+    groups = {g["name"]: g for g in doc["proxy-groups"]}
+    assert aws_jp in groups["PROXY"]["proxies"] and aws_us in groups["PROXY"]["proxies"]
+    # PROXY 之外任何组都不引用裸 AWS(含 claude 显式清单里误写的 aws_us)
     for g in doc["proxy-groups"]:
+        if g["name"] == "PROXY":
+            continue
         assert aws_jp not in g.get("proxies", []), g["name"]
         assert aws_us not in g.get("proxies", []), g["name"]
-    assert sm.CLIENT_EXPORT_RENDER_REV == "18"
+    assert sm.CLIENT_EXPORT_RENDER_REV == "19"
 
 
 def test_skip_merge_subscription_stays_out_of_merged(temp_clash_root, monkeypatch):
