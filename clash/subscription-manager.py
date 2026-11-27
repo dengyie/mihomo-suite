@@ -36,9 +36,11 @@ import yaml
 
 try:
     from clash_lock import ClashConfigLock
+    from google_ai_rules import google_ai_rules
 except ImportError:  # module loaded by path (tests / gateway) without its dir on sys.path
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from clash_lock import ClashConfigLock
+    from google_ai_rules import google_ai_rules
 
 # ROOT configuration supporting CLASH_ROOT environment variable
 CLASH_ROOT_ENV = os.environ.get('CLASH_ROOT')
@@ -373,67 +375,10 @@ CLIENT_OPENAI_RULES = [
     'DOMAIN-SUFFIX,oaiusercontent.com,' + OPENAI_GROUP,
     'DOMAIN-SUFFIX,auth0.openai.com,' + OPENAI_GROUP,
 ]
-# 2026-11-27: Gemini / AI Studio / NotebookLM / Antigravity / Jules / Labs 等 Google AI
-# 端点(用户提供清单)。新 gTLD(.google/.goog/ai.studio/gemma.ai)与 deepmind.com /
-# withgoogle.com / google.dev 不在下方 google.com/googleapis.com 后缀覆盖内, 原来落 MATCH,PROXY。
-# 被后缀覆盖的条目照单保留: 显式清单便于对账, 排在通用 Google 规则之前。
-CLIENT_GOOGLE_AI_DOMAINS = (
-    'ai.google.dev',
-    'alkalicore-pa.clients6.google.com',
-    'alkalimakersuite-pa.clients6.google.com',
-    'webchannel-alkalimakersuite-pa.clients6.google.com',
-    'geminiweb-pa.clients.google.com',
-    'geminiweb-pa.clients6.google.com',
-    'appsgenaiserver-pa.clients.google.com',
-    'appsgenaiserver-pa.clients6.google.com',
-    'appsgenaiserver-pa.googleapis.com',
-    'cloudaicompanion.googleapis.com',
-    'cloudcode-pa.googleapis.com',
-    'daily-cloudcode-pa.googleapis.com',
-    'notebooklm-pa.googleapis.com',
-    'notebooklm.googleapis.com',
-    'antigravity-pa.googleapis.com',
-    'antigravity.googleapis.com',
-)
-CLIENT_GOOGLE_AI_SUFFIXES = (
-    'notebook.google',
-    'deepmind.google',
-    'gemma.ai',
-    'antigravity-unleash.goog',
-    'antigravity.google',
-    'opal.google',
-    'generativeai.google',
-    'flow.google',
-    'ai.studio',
-    'labs.google',
-    'jules.google',
-    'gemini.google',
-    'notebooklm.google',
-    'deepmind.com',
-    'notebook.google.com',
-    'makersuite.google.com',
-    'gemini.gstatic.com',
-    'gemini.google.com',
-    'notebooklm.google.com',
-    'bard.google.com',
-    'jules.google.com',
-    'aistudio.google.com',
-    'labs.google.com',
-    'geller-pa.googleapis.com',
-    'flow.google.com',
-    'aisandbox-pa.googleapis.com',
-    'aicode.googleapis.com',
-    'aida.googleapis.com',
-    'robinfrontend-pa.googleapis.com',
-    'opal.google.com',
-    'proactivebackend-pa.googleapis.com',
-    'generativelanguage.googleapis.com',
-    'stitch.withgoogle.com',
-    'labstailwind.pa.googleapis.com',
-)
 CLIENT_GOOGLE_RULES = [
-    *('DOMAIN,' + d + ',' + GOOGLE_GROUP for d in CLIENT_GOOGLE_AI_DOMAINS),
-    *('DOMAIN-SUFFIX,' + d + ',' + GOOGLE_GROUP for d in CLIENT_GOOGLE_AI_SUFFIXES),
+    # Google AI endpoints: single source in google_ai_rules.py (shared with
+    # rules-reconciler's managed block for the live server configs)
+    *google_ai_rules(GOOGLE_GROUP),
     'DOMAIN,accounts.google.com,' + GOOGLE_GROUP,
     'DOMAIN,accounts.youtube.com,' + GOOGLE_GROUP,
     'DOMAIN,oauth2.googleapis.com,' + GOOGLE_GROUP,

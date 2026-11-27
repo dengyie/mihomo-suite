@@ -25,9 +25,11 @@ import yaml
 
 try:
     from clash_lock import ClashConfigLock
+    from google_ai_rules import GOOGLE_AI_GROUP, google_ai_rules
 except ImportError:  # script loaded by path (tests) without its dir on sys.path
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from clash_lock import ClashConfigLock
+    from google_ai_rules import GOOGLE_AI_GROUP, google_ai_rules
 
 # ROOT configuration supporting CLASH_ROOT environment variable
 CLASH_ROOT_ENV = os.environ.get('CLASH_ROOT')
@@ -199,6 +201,18 @@ def save_injected_rules(injected: List[str]) -> None:
     TRACKER_FILE.write_text(json.dumps(injected, ensure_ascii=False, indent=2))
 
 
+def managed_rules_for(cfg: Dict[str, Any], user_rules: List[str]) -> List[str]:
+    """Code-owned rules injected right after the user rules (single source:
+    google_ai_rules.py). Skipped when the config has no 🎯Google group (the
+    rule would fail mihomo -t); entries a user rule already carries are not
+    duplicated."""
+    groups = {str(g.get('name')) for g in (cfg.get('proxy-groups') or []) if isinstance(g, dict)}
+    if GOOGLE_AI_GROUP not in groups:
+        return []
+    have = set(user_rules)
+    return [r for r in google_ai_rules(GOOGLE_AI_GROUP) if r not in have]
+
+
 def merge_rules_into_config(cfg: Dict[str, Any], user_rules_list: List[Dict[str, Any]], previous_injected: List[str]) -> Tuple[Dict[str, Any], List[str]]:
     original_rules = cfg.get('rules', [])
     if not isinstance(original_rules, list):
@@ -223,9 +237,10 @@ def merge_rules_into_config(cfg: Dict[str, Any], user_rules_list: List[Dict[str,
         if r.get('enabled', True)
     ]
 
-    # Prepend new user rules without stripping base rules that happen to match
-    cfg['rules'] = current_enabled_rules + base_rules
-    return cfg, current_enabled_rules
+    injected = current_enabled_rules + managed_rules_for(cfg, current_enabled_rules)
+    # Prepend user + managed rules without stripping base rules that happen to match
+    cfg['rules'] = injected + base_rules
+    return cfg, injected
 
 
 def test_candidate_config(candidate_path: Path) -> Tuple[bool, str]:
