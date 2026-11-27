@@ -44,7 +44,7 @@ const script = new vm.Script(
 const ctx = { __CONFIG_JSON__: JSON.stringify(config), console };
 vm.createContext(ctx);
 const out = JSON.parse(script.runInContext(ctx));
-fs.writeFileSync("/tmp/scripts/guard-after.json", JSON.stringify(out, null, 1));
+fs.writeFileSync(process.env.GUARD_OUT || "/tmp/scripts/guard-after.json", JSON.stringify(out, null, 1));
 
 const groups = out["proxy-groups"] || [];
 const claude = groups.find((g) => g.name === TARGET);

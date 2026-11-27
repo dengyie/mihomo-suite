@@ -42,7 +42,7 @@ const SELF_TAG = "[自建] ";
 const mustHave = [
   "VLESS-Huawei-SH-Reality", "[share] 🇺🇸US-Vmess2(Bwh)", "🏠home-win-mesh",
   "[tomorin] [anytls]VN Hanoi VNPT", "AnyTLS-googlevps", "[share] 🇭🇰HK-Warp1(Sak)",
-  "[tomorin] US LAS Buyvm", "TUIC-Azure", "🇺🇸PIGEONW-家宽-01",
+  "[tomorin] US LAS Buyvm IPv6", "TUIC-Azure", "🇺🇸PIGEONW-家宽-01",
 ];
 // self-built names carry "[自建] " + optional region flag; airport names keep their flag
 const stripTag = (n) => {
@@ -57,7 +57,8 @@ const rawInputNames = new Set((config.proxies || []).map((p) => p?.name).filter(
 for (const n of rawInputNames) {
   if (!exclude.has(n)) ok(outNames.has(n), `non-excluded proxy dropped: ${n}`);
 }
-ok(outNames.size === 95, `proxy count ${outNames.size} != 95`);
+const expectProxies = Number(process.env.EXPECT_PROXIES || 130);
+ok(outNames.size === expectProxies, `proxy count ${outNames.size} != ${expectProxies}`);
 
 // 3. mesh node injected and first member of 🏠家宽 (no CF fallback)
 const MESH = "🏠home-win-mesh";
@@ -83,7 +84,7 @@ for (const g of out["proxy-groups"] || []) {
 // 5. expected member counts (snapshot-coupled: re-pin when sub.json is refreshed)
 // REV 18: 🎯Claude/🎯OpenAI/🎯Meta merged into 🎯美国; per-host gradients are hidden fallbacks.
 const US = "🎯美国";
-const expectCounts = JSON.parse(process.env.EXPECT_COUNTS || "null") || { PROXY: 96, "🎯Google": 32, [US]: 33, "🏠家宽": 2 };
+const expectCounts = JSON.parse(process.env.EXPECT_COUNTS || "null") || { PROXY: 112, "🎯Google": 31, [US]: 30, "🏠家宽": 2 };
 for (const [name, want] of Object.entries(expectCounts)) {
   const g = (out["proxy-groups"] || []).find((x) => x?.name === name);
   ok(g && (g.proxies || []).length === want, `group ${name}: ${(g && (g.proxies || []).length) || "missing"} != ${want}`);
