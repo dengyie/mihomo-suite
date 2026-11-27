@@ -81,7 +81,9 @@ for (const g of out["proxy-groups"] || []) {
 }
 
 // 5. expected member counts (snapshot-coupled: re-pin when sub.json is refreshed)
-const expectCounts = { PROXY: 96, AUTO: 93, "🎯Google": 32, "🎯Claude": 33, "🎯OpenAI": 30, "🏠家宽": 2 };
+// REV 18: 🎯Claude/🎯OpenAI/🎯Meta merged into 🎯美国; per-host gradients are hidden fallbacks.
+const US = "🎯美国";
+const expectCounts = JSON.parse(process.env.EXPECT_COUNTS || "null") || { PROXY: 96, "🎯Google": 32, [US]: 33, "🏠家宽": 2 };
 for (const [name, want] of Object.entries(expectCounts)) {
   const g = (out["proxy-groups"] || []).find((x) => x?.name === name);
   ok(g && (g.proxies || []).length === want, `group ${name}: ${(g && (g.proxies || []).length) || "missing"} != ${want}`);
@@ -90,8 +92,14 @@ for (const [name, want] of Object.entries(expectCounts)) {
 // 6. rules sane
 const rules = out.rules || [];
 ok(rules.some((r) => /^MATCH,/.test(r)), "no MATCH rule");
-ok(rules.some((r) => r.includes("🎯Claude")), "claude rules lost");
-ok(rules.some((r) => r.includes("🎯OpenAI")), "openai rules lost");
+ok(rules.some((r) => r === "DOMAIN-SUFFIX,claude.ai," + US), "claude rules lost");
+ok(rules.some((r) => r === "DOMAIN-SUFFIX,openai.com," + US), "openai rules lost");
+ok(!rules.some((r) => /🎯(Claude|OpenAI|Meta)(,|$)/.test(r)), "rule still targets a legacy US group");
+// 7. exposed set: only curated groups are visible in the panel
+const EXPOSED = new Set(["PROXY", "🎯Google", US, "🎯ZCode", "🌏港澳台优选", "🏠家宽", "GLOBAL"]);
+for (const g of out["proxy-groups"] || []) {
+  ok(EXPOSED.has(g.name) || g.hidden === true, `group ${g.name} is exposed but not in the curated set`);
+}
 ok(!rules.some((r) => /MangoCF|mangoqwq\.com/i.test(r)), "legacy MangoCF/mangoqwq.com rule still present");
 ok(rules.some((r) => r.includes("🏠家宽")), "home broadband rules lost");
 

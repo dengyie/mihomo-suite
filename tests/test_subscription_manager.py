@@ -806,7 +806,7 @@ def test_client_clash_export_webrtc_stun_and_media_rules_ordering(temp_clash_roo
     assert idx_media < idx_stun_domain
     assert idx_stun_domain < idx_cf
     assert idx_stun_port < idx_cf
-    assert sm.CLIENT_EXPORT_RENDER_REV == "17"
+    assert sm.CLIENT_EXPORT_RENDER_REV == "18"
 
 
 def test_client_home_broadband_group_routes_hybgzs(temp_clash_root):
@@ -1022,10 +1022,9 @@ def test_client_google_group_uses_simple_groups_list(temp_clash_root):
     assert google_group["proxies"] == ["Pinned-US"]
 
 
-def test_client_meta_group_mirrors_claude_and_never_direct(temp_clash_root):
-    """🎯Meta 专组 (2026-11-24): 成员对齐 Claude 同一美国选型; 规则零 DIRECT;
-    Facebook/Muse.ai 核心域名走 META 组; 本地覆写 (Script.js) 规则重建时
-    metaRules 白名单已透传, 源端规则不会被丢弃。"""
+def test_client_us_group_merges_claude_meta_openai_and_never_direct(temp_clash_root):
+    """REV 18 (2026-11-27): 🎯Claude/🎯Meta/🎯OpenAI 合并为 🎯美国 单组; 成员为三份
+    清单保序并集(claude 打头); Claude/Meta/OpenAI 三套规则全部指向 🎯美国, 零 DIRECT。"""
     engine = SubscriptionEngine(root=temp_clash_root)
     (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
     (temp_clash_root / "airports" / "local-nodes.yaml").write_text(
@@ -1034,31 +1033,57 @@ def test_client_meta_group_mirrors_claude_and_never_direct(temp_clash_root):
                 "proxies": [
                     {"name": "[自建] 🇺🇸TUIC-googlevps", "type": "tuic", "server": "us.example.com", "port": 443},
                     {"name": "美国_BGP_A", "type": "anytls", "server": "bgp.example.com", "port": 443},
+                    {"name": "美国_BGP_B", "type": "anytls", "server": "bgp.example.com", "port": 444},
                     {"name": "🇯🇵日本-直连", "type": "ss", "server": "jp.example.com", "port": 8388, "cipher": "aes-128-gcm", "password": "x"},
                 ],
-                "groups": {"claude": ["[自建] 🇺🇸TUIC-googlevps", "美国_BGP_A"]},
+                "groups": {
+                    "claude": ["[自建] 🇺🇸TUIC-googlevps", "美国_BGP_A"],
+                    "meta": ["美国_BGP_A", "美国_BGP_B"],
+                    "openai": ["[自建] 🇺🇸TUIC-googlevps"],
+                },
             }
         ),
         encoding="utf-8",
     )
-    yaml_text = engine.render_client_clash_config(fetch_remote=False)
-    doc = yaml.safe_load(yaml_text)
+    doc = yaml.safe_load(engine.render_client_clash_config(fetch_remote=False))
     groups = {g["name"]: g for g in doc["proxy-groups"]}
-    # 组存在且 select
-    assert groups["🎯Meta"]["type"] == "fallback"
-    # 成员对齐 Claude (同一美国选型, 日本节点被排除)
-    assert groups["🎯Meta"]["proxies"] == groups["🎯Claude"]["proxies"]
-    assert "🇯🇵日本-直连" not in groups["🎯Meta"]["proxies"]
-    # 核心域名规则走 Meta 组
+    for legacy in ("🎯Claude", "🎯Meta", "🎯OpenAI"):
+        assert legacy not in groups
+    us = groups["🎯美国"]
+    assert us["type"] == "fallback"
+    assert us["proxies"] == ["[自建] 🇺🇸TUIC-googlevps", "美国_BGP_A", "美国_BGP_B"]
+    assert "🇯🇵日本-直连" not in us["proxies"]
     rules = doc["rules"]
-    for domain in ("facebook.com", "instagram.com", "whatsapp.com", "threads.net", "muse.ai", "meta.ai"):
-        assert f"DOMAIN-SUFFIX,{domain},🎯Meta" in rules
-    # Meta 规则零 DIRECT (用户硬约束: Facebook/Muse 渠道绝不本地直连)
-    meta_rules = [r for r in rules if r.endswith(",🎯Meta") or ",🎯Meta,no-resolve" in r]
-    assert meta_rules and all("DIRECT" not in r for r in meta_rules)
-    # IP 兜底在列且 no-resolve
-    assert "IP-CIDR,157.240.0.0/16,🎯Meta,no-resolve" in rules
-    assert "IP-CIDR6,2a03:2880::/29,🎯Meta,no-resolve" in rules
+    for domain in ("claude.ai", "anthropic.com", "openai.com", "chatgpt.com",
+                   "facebook.com", "instagram.com", "whatsapp.com", "muse.ai", "meta.ai"):
+        assert f"DOMAIN-SUFFIX,{domain},🎯美国" in rules
+    assert "IP-CIDR,160.79.104.0/21,🎯美国,no-resolve" in rules
+    assert "IP-CIDR,157.240.0.0/16,🎯美国,no-resolve" in rules
+    assert not any("🎯Claude" in r or "🎯Meta" in r or "🎯OpenAI" in r for r in rules)
+    us_rules = [r for r in rules if "🎯美国" in r]
+    assert us_rules and all("DIRECT" not in r for r in us_rules)
+    assert len(rules) == len(set(rules))
+    assert sm.validate_client_clash_yaml(yaml.safe_dump(doc, allow_unicode=True)) == []
+
+
+def test_client_us_group_prefers_explicit_us_list(temp_clash_root):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
+    (temp_clash_root / "airports" / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": [
+                    {"name": "美国_BGP_A", "type": "anytls", "server": "bgp.example.com", "port": 443},
+                    {"name": "美国_BGP_B", "type": "anytls", "server": "bgp.example.com", "port": 444},
+                ],
+                "groups": {"claude": ["美国_BGP_A"], "us": ["美国_BGP_B", "美国_BGP_A"]},
+            }
+        ),
+        encoding="utf-8",
+    )
+    doc = yaml.safe_load(engine.render_client_clash_config(fetch_remote=False))
+    us = {g["name"]: g for g in doc["proxy-groups"]}["🎯美国"]
+    assert us["proxies"] == ["美国_BGP_B", "美国_BGP_A"]
 
 
 def test_client_bare_aws_hidden_from_all_groups_but_defined(temp_clash_root):
@@ -1091,7 +1116,7 @@ def test_client_bare_aws_hidden_from_all_groups_but_defined(temp_clash_root):
     for g in doc["proxy-groups"]:
         assert aws_jp not in g.get("proxies", []), g["name"]
         assert aws_us not in g.get("proxies", []), g["name"]
-    assert sm.CLIENT_EXPORT_RENDER_REV == "17"
+    assert sm.CLIENT_EXPORT_RENDER_REV == "18"
 
 
 def test_skip_merge_subscription_stays_out_of_merged(temp_clash_root, monkeypatch):
@@ -2656,11 +2681,9 @@ def test_client_business_groups_fail_over_inside_curated_members(temp_clash_root
     assert google["url"] == "https://www.google.com/generate_204"
     # members are exactly the curated list: no PROXY/AUTO/DIRECT/relay fallbacks
     assert google["proxies"] == ["[自建] 🇺🇸TUIC-googlevps", "[自建] 🇺🇸AnyTLS-googlevps", "美国_BGP_A"]
-    claude = groups["🎯Claude"]
-    assert claude["type"] == "fallback"
-    assert claude["proxies"][0] == "[自建] 🇺🇸TUIC-googlevps"  # order = preference
-    # single-member group stays a plain select
-    assert groups["🎯OpenAI"]["type"] == "select"
+    us = groups["🎯美国"]
+    assert us["type"] == "fallback"
+    assert us["proxies"][0] == "[自建] 🇺🇸TUIC-googlevps"  # order = preference
     assert groups["PROXY"]["type"] == "select"
     assert groups["🏠家宽"]["type"] == "select"
 
@@ -2673,3 +2696,141 @@ def test_client_export_fingerprint_tracks_self_node_ip_change(temp_clash_root, m
     monkeypatch.setattr(sm, "_resolve_server_ips", lambda h: ["8.8.4.4"])
     after = engine._client_export_inputs_fingerprint()
     assert before != after
+
+
+# ---------------------------------------------------------------- REV 18 gradients
+_GVPS_TUIC = "[自建] 🇺🇸TUIC-googlevps"
+_GVPS_ANYTLS = "[自建] 🇺🇸AnyTLS-googlevps"
+_GVPS_MESH_HTTP = "[自建] 🇺🇸Mesh-googlevps-EasyTier"
+_AZ_VLESS = "[自建] 🇭🇰VLESS-Azure-Reality"
+_AZ_ANYTLS = "[自建] 🇭🇰AnyTLS-Azure"
+_MESH_SOCKS = "[自建] EasyTier-mesh-socks"
+
+
+def _rev18_local_nodes(root, *, with_dialer=True):
+    (root / "airports").mkdir(parents=True, exist_ok=True)
+    proxies = [
+        {"name": _GVPS_TUIC, "type": "tuic", "server": "vps.example.com", "port": 47685},
+        {"name": _GVPS_ANYTLS, "type": "anytls", "server": "vps.example.com", "port": 60629, "sni": "vps.example.com"},
+        {"name": _GVPS_MESH_HTTP, "type": "http", "server": "10.0.0.4", "port": 10801},
+        {"name": _AZ_VLESS, "type": "vless", "server": "1.0.0.1", "port": 56667, "uuid": "x"},
+        {"name": _AZ_ANYTLS, "type": "anytls", "server": "1.0.0.1", "port": 25743, "dialer-proxy": _GVPS_ANYTLS},
+        {"name": "[自建] 🇮🇳VLESS-India-Reality", "type": "vless", "server": "1.0.0.2", "port": 56667, "uuid": "x"},
+        {"name": "美国_BGP_A", "type": "anytls", "server": "bgp.example.com", "port": 443},
+    ]
+    if with_dialer:
+        proxies.append({"name": _MESH_SOCKS, "type": "socks5", "server": "127.0.0.1", "port": 11080})
+    (root / "airports" / "local-nodes.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "proxies": proxies,
+                "groups": {
+                    "auto-exclude": [_GVPS_ANYTLS],
+                    "google": [_GVPS_TUIC, _GVPS_ANYTLS, _GVPS_MESH_HTTP, "美国_BGP_A"],
+                    "claude": [_GVPS_TUIC, "美国_BGP_A"],
+                },
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+    (root / "airports" / "mesh-gradients.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "hosts": [
+                    {"name": "[自建] 🇺🇸googlevps-梯度", "mesh-server": "10.0.0.4",
+                     "members": [_GVPS_TUIC, _GVPS_ANYTLS], "mesh-only": [_GVPS_MESH_HTTP]},
+                    {"name": "[自建] 🇭🇰Azure-梯度", "mesh-server": "10.0.0.2",
+                     "members": [_AZ_VLESS, _AZ_ANYTLS]},
+                    # single candidate + no mesh -> no group (nothing to fail over to)
+                    {"name": "[自建] 🇮🇳India-梯度", "members": ["[自建] 🇮🇳VLESS-India-Reality"]},
+                    # all members missing -> skipped
+                    {"name": "[自建] Ghost-梯度", "mesh-server": "10.0.0.9", "members": ["[自建] gone"]},
+                ],
+            },
+            allow_unicode=True,
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_client_gradient_groups_hidden_with_mesh_fallback(temp_clash_root):
+    _rev18_local_nodes(temp_clash_root)
+    engine = SubscriptionEngine(root=temp_clash_root)
+    doc = yaml.safe_load(engine.render_client_clash_config(fetch_remote=False))
+    groups = {g["name"]: g for g in doc["proxy-groups"]}
+    nodes = {p["name"]: p for p in doc["proxies"]}
+
+    gv = groups["[自建] 🇺🇸googlevps-梯度"]
+    assert gv["type"] == "fallback" and gv["hidden"] is True
+    # public (declared order) -> mesh clones of TCP members (TUIC skipped) -> mesh-only
+    assert gv["proxies"] == [_GVPS_TUIC, _GVPS_ANYTLS, _GVPS_ANYTLS + "·mesh", _GVPS_MESH_HTTP]
+    assert _GVPS_TUIC + "·mesh" not in nodes
+    clone = nodes[_GVPS_ANYTLS + "·mesh"]
+    assert clone["server"] == "10.0.0.4" and clone["dialer-proxy"] == _MESH_SOCKS
+    assert clone["sni"] == "vps.example.com" and clone["port"] == 60629
+
+    az = groups["[自建] 🇭🇰Azure-梯度"]
+    assert az["proxies"] == [_AZ_VLESS, _AZ_ANYTLS, _AZ_VLESS + "·mesh", _AZ_ANYTLS + "·mesh"]
+    # mesh clone replaces the public chain dialer with the mesh dialer
+    assert nodes[_AZ_ANYTLS + "·mesh"]["dialer-proxy"] == _MESH_SOCKS
+    assert nodes[_AZ_ANYTLS]["dialer-proxy"] == _GVPS_ANYTLS
+
+    assert "[自建] 🇮🇳India-梯度" not in groups
+    assert "[自建] Ghost-梯度" not in groups
+    assert groups["AUTO"]["hidden"] is True
+    assert sm.validate_client_clash_yaml(yaml.safe_dump(doc, allow_unicode=True)) == []
+
+
+def test_client_gradient_collapses_host_nodes_in_every_group(temp_clash_root):
+    _rev18_local_nodes(temp_clash_root)
+    engine = SubscriptionEngine(root=temp_clash_root)
+    doc = yaml.safe_load(engine.render_client_clash_config(fetch_remote=False))
+    groups = {g["name"]: g for g in doc["proxy-groups"]}
+    gv, az = "[自建] 🇺🇸googlevps-梯度", "[自建] 🇭🇰Azure-梯度"
+    raw = {_GVPS_TUIC, _GVPS_ANYTLS, _GVPS_MESH_HTTP, _AZ_VLESS, _AZ_ANYTLS}
+    for name in ("PROXY", "AUTO", "🎯Google", "🎯美国"):
+        assert not raw & set(groups[name]["proxies"]), name
+    assert groups["PROXY"]["proxies"][:3] == ["AUTO", gv, az]
+    assert "[自建] 🇮🇳VLESS-India-Reality" in groups["PROXY"]["proxies"]
+    # AUTO keeps the host via its non-excluded TUIC member
+    assert gv in groups["AUTO"]["proxies"]
+    # curated groups keep their in-group order, host collapsed at first position
+    assert groups["🎯Google"]["proxies"] == [gv, "美国_BGP_A"]
+    assert groups["🎯美国"]["proxies"] == [gv, "美国_BGP_A"]
+    # exposed set: only PROXY + business groups are visible
+    visible = [g["name"] for g in doc["proxy-groups"] if not g.get("hidden")]
+    assert visible == ["PROXY", "🎯Google", "🎯美国", "🏠家宽"]
+
+
+def test_client_gradient_without_mesh_dialer_keeps_public_failover(temp_clash_root):
+    _rev18_local_nodes(temp_clash_root, with_dialer=False)
+    engine = SubscriptionEngine(root=temp_clash_root)
+    doc = yaml.safe_load(engine.render_client_clash_config(fetch_remote=False))
+    groups = {g["name"]: g for g in doc["proxy-groups"]}
+    assert not any(p["name"].endswith("·mesh") for p in doc["proxies"])
+    assert groups["[自建] 🇭🇰Azure-梯度"]["proxies"] == [_AZ_VLESS, _AZ_ANYTLS]
+    assert sm.validate_client_clash_yaml(yaml.safe_dump(doc, allow_unicode=True)) == []
+
+
+def test_client_without_mesh_gradients_file_is_unchanged_shape(temp_clash_root):
+    _rev17_local_nodes(temp_clash_root)
+    engine = SubscriptionEngine(root=temp_clash_root)
+    doc = yaml.safe_load(engine.render_client_clash_config(fetch_remote=False))
+    assert not any(g["name"].endswith("-梯度") for g in doc["proxy-groups"])
+    assert "[自建] 🇺🇸TUIC-googlevps" in {g["name"]: g for g in doc["proxy-groups"]}["PROXY"]["proxies"]
+
+
+def test_client_export_fingerprint_tracks_mesh_gradients(temp_clash_root):
+    _rev18_local_nodes(temp_clash_root)
+    engine = SubscriptionEngine(root=temp_clash_root)
+    before = engine._client_export_inputs_fingerprint()
+    (temp_clash_root / "airports" / "mesh-gradients.yaml").write_text("hosts: []\n", encoding="utf-8")
+    assert engine._client_export_inputs_fingerprint() != before
+
+
+def test_load_mesh_gradients_tolerates_bad_file(tmp_path):
+    bad = tmp_path / "mesh-gradients.yaml"
+    bad.write_text("hosts: [::\n", encoding="utf-8")
+    assert sm.load_mesh_gradients(bad) == []
+    assert sm.load_mesh_gradients(tmp_path / "missing.yaml") == []

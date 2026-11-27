@@ -10,7 +10,7 @@
 - 全局 `Script.js`（`enable_builtin_enhanced: true` 时对所有配置生效）是唯一
   长期生效的位置；`main()` 开头的 `dropDeadNodes()` 删节点，
   `pruneProxyGroups()` 自动把组员对账清干净。
-- ⚠️ 名单必须**指纹门控**（`🏠家宽` + `🎯Claude` + `🎯OpenAI` 三组同时存在；已不再使用已退役的 `MangoCF` / `🏠home-win-CF`）：
+- ⚠️ 名单必须**指纹门控**（`🏠家宽` + `🎯美国` 同时存在，兼容旧版 `🎯Claude` + `🎯OpenAI`；已不再使用已退役的 `MangoCF` / `🏠home-win-CF`）：
   草莓订阅 `RT86t6ly58RD` 和宝可梦订阅 `Ri4BTq8ZwowL` 有同名节点但服务器不同，
   按名字全局删会误伤。
 

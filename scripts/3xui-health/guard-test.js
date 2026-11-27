@@ -22,12 +22,13 @@ const deadName = exclude.find((n) => rawSet.has(n)) || exclude[0];
 const fail = [];
 const ok = (cond, msg) => { if (!cond) fail.push(msg); };
 
-// Sanity: the group we target is referenced by rules.
+// Sanity: the group we target is referenced by rules (REV 18 name, legacy fallback).
 const rules = config.rules || [];
-ok(rules.some((r) => r.endsWith(",🎯Claude")), "fixture: no rule references 🎯Claude");
+const TARGET = config["proxy-groups"].some((g) => g.name === "🎯美国") ? "🎯美国" : "🎯Claude";
+ok(rules.some((r) => r.endsWith("," + TARGET)), "fixture: no rule references " + TARGET);
 
 // Case 1: rule-referenced group with only dead members.
-const c1 = config["proxy-groups"].find((g) => g.name === "🎯Claude");
+const c1 = config["proxy-groups"].find((g) => g.name === TARGET);
 c1.proxies = [deadName];
 
 // Case 2: unreferenced group with only dead members.
@@ -46,7 +47,7 @@ const out = JSON.parse(script.runInContext(ctx));
 fs.writeFileSync("/tmp/scripts/guard-after.json", JSON.stringify(out, null, 1));
 
 const groups = out["proxy-groups"] || [];
-const claude = groups.find((g) => g.name === "🎯Claude");
+const claude = groups.find((g) => g.name === TARGET);
 const orphan = groups.find((g) => g.name === "🪦未引用的空组");
 
 ok(!!claude, "rule-referenced empty group was dropped (should survive)");

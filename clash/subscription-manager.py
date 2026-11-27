@@ -63,7 +63,10 @@ CLIENT_EXPORT_TOKEN_MODE = 0o640
 # 2026-11-24: REV '16' - PROXY/AUTO 隐藏 AWS 裸节点, 保留定义供 listeners 引用
 # 2026-11-27: REV '17' - 自建节点直连 IP 渲染期自动推导 (DIRECT + tun.route-exclude-address),
 #   🎯Google 改 url-test(组内择优), 🎯Claude/🎯Meta/🎯OpenAI 改 fallback(组内顺序故障转移)
-CLIENT_EXPORT_RENDER_REV = '17'
+# 2026-11-27: REV '18' - 精简暴露组: 🎯Claude/🎯Meta/🎯OpenAI 合并为 🎯美国, AUTO 隐藏;
+#   每台自建主机一个隐藏梯度 fallback 组(公网变体 -> EasyTier mesh 兜底, 见 mesh-gradients.yaml),
+#   PROXY/AUTO/业务组内同主机裸节点折叠为该梯度组
+CLIENT_EXPORT_RENDER_REV = '18'
 # 客户端订阅保留节点定义(本地 Merge.yaml listeners 等直接引用), 但不在任何
 # 组成员中暴露裸 AWS 节点——本地用 Script.js 的梯度 fallback 组替代它们。
 CLIENT_HIDE_FROM_GROUPS = frozenset({
@@ -272,7 +275,10 @@ CLIENT_HOME_BROADBAND_RULES = [
 ]
 
 GOOGLE_GROUP = '🎯Google'
-CLAUDE_GROUP = '🎯Claude'
+# 2026-11-27 REV 18: Claude/Meta/OpenAI 三组成员几乎一致(同一美国纯净出口选型),
+# 合并为单一 🎯美国 组; 三套规则清单保留各自来源注释, 统一指向该组。
+US_GROUP = '🎯美国'
+CLAUDE_GROUP = US_GROUP
 CLIENT_CLAUDE_RULES = [
     # 核心业务
     'DOMAIN-SUFFIX,claude.ai,' + CLAUDE_GROUP,
@@ -312,7 +318,7 @@ CLIENT_CLAUDE_RULES = [
 # Threads 全家桶 + muse.ai (Meta Muse 视频模型网页端, Meta CDN, 境内直连流级
 # 丢包判死刑, 见 muse2api 手册)。IP 段经 RIPEstat 核对全部在 AS32934 宣告内;
 # 沿用 Claude 教训严禁 IP-ASN (ASN.mmdb 缺失时 mihomo 联网下载 90s 超时炸配置)。
-META_GROUP = '🎯Meta'
+META_GROUP = US_GROUP
 CLIENT_META_RULES = [
     # Facebook 全家桶
     'DOMAIN-SUFFIX,facebook.com,' + META_GROUP,
@@ -354,7 +360,7 @@ CLIENT_META_RULES = [
     'IP-CIDR6,2620:0:1c00::/40,' + META_GROUP + ',no-resolve',
     'IP-CIDR6,2a03:2880::/29,' + META_GROUP + ',no-resolve',
 ]
-OPENAI_GROUP = '🎯OpenAI'
+OPENAI_GROUP = US_GROUP
 CLIENT_OPENAI_RULES = [
     'DOMAIN-SUFFIX,openai.com,' + OPENAI_GROUP,
     'DOMAIN-SUFFIX,chatgpt.com,' + OPENAI_GROUP,
@@ -393,6 +399,7 @@ LOCAL_GROUP_GOOGLE = 'google'
 LOCAL_GROUP_OPENAI = 'openai'
 LOCAL_GROUP_CLAUDE = 'claude'
 LOCAL_GROUP_META = 'meta'
+LOCAL_GROUP_US = 'us'
 LOCAL_GROUP_GROK = 'grok'
 
 
@@ -742,6 +749,137 @@ def _business_group(name: str, gtype: str, members: List[str],
     if gtype == 'url-test':
         group['tolerance'] = 50
     return group
+
+
+# 2026-11-27 REV 18: 自建主机梯度。每台主机一个隐藏 fallback 组:
+# 公网变体(声明序, TUIC 等 UDP 协议优先写前) -> 各 TCP 变体的 EasyTier mesh
+# 克隆(server 改主机 mesh IP, dialer 走本机 easytier socks5 出口) -> 既有
+# mesh-only 节点。mesh IP 属私有拓扑, 只在私有数据文件 airports/mesh-gradients.yaml
+# 声明, 不进公开仓库。UDP 协议(TUIC/hy2)经 socks5 dialer 不通, 不生成 mesh 克隆。
+MESH_GRADIENTS_FILE_NAME = 'mesh-gradients.yaml'
+MESH_VARIANT_SUFFIX = '·mesh'
+MESH_DEFAULT_DIALER = SELF_TAG + 'EasyTier-mesh-socks'
+GRADIENT_PROBE_INTERVAL = 120
+
+
+def load_mesh_gradients(path: Path) -> List[Dict[str, Any]]:
+    """Parse ``mesh-gradients.yaml``; a missing or malformed file means no gradients.
+
+    Schema::
+
+        dialer: '[自建] EasyTier-mesh-socks'   # optional
+        hosts:
+          - name: '[自建] 🇭🇰Azure-梯度'
+            mesh-server: <host mesh ip>
+            members: [<public node names, preference order>]
+            mesh-only: [<existing mesh-only node names>]   # optional
+    """
+    if not path.exists():
+        return []
+    try:
+        data = fast_yaml_load(path.read_text(encoding='utf-8', errors='ignore')) or {}
+    except Exception as e:
+        _export_warn('mesh-gradients unreadable, skipped: %s' % e)
+        return []
+    if not isinstance(data, dict):
+        return []
+    default_dialer = str(data.get('dialer') or MESH_DEFAULT_DIALER).strip()
+    specs: List[Dict[str, Any]] = []
+    for item in data.get('hosts') or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get('name') or '').strip()
+        members = [str(m).strip() for m in item.get('members') or [] if str(m or '').strip()]
+        if not name or not members:
+            continue
+        specs.append({
+            'name': name,
+            'mesh_server': str(item.get('mesh-server') or '').strip(),
+            'members': members,
+            'mesh_only': [str(m).strip() for m in item.get('mesh-only') or [] if str(m or '').strip()],
+            'dialer': str(item.get('dialer') or default_dialer).strip(),
+        })
+    return specs
+
+
+def build_self_gradients(
+    specs: List[Dict[str, Any]],
+    proxies: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, str]]:
+    """Return (mesh clone nodes, hidden gradient groups, member -> group map).
+
+    Members absent from ``proxies`` (disabled / renamed) are skipped; a host
+    left with fewer than two candidates gets no group (nothing to fail over
+    to) and its node stays referenced directly.
+    """
+    by_name = {str(p.get('name')): p for p in proxies if isinstance(p, dict)}
+    taken = set(by_name)
+    clones: List[Dict[str, Any]] = []
+    groups: List[Dict[str, Any]] = []
+    mapping: Dict[str, str] = {}
+    for spec in specs:
+        gname = spec['name']
+        if gname in taken or gname in CLIENT_BUILTIN_OUTBOUNDS:
+            _export_warn('mesh-gradient %s collides with a node name, skipped' % gname)
+            continue
+        public = [m for m in spec['members'] if m in by_name and m not in mapping]
+        mesh: List[str] = []
+        host_clones: List[Dict[str, Any]] = []
+        if spec['mesh_server'] and spec['dialer'] in by_name:
+            for m in public:
+                node = by_name[m]
+                if str(node.get('type') or '').lower() in UDP_NODE_TYPES:
+                    continue
+                cname = m + MESH_VARIANT_SUFFIX
+                if cname in taken:
+                    continue
+                clone = dict(node)
+                clone['name'] = cname
+                clone['server'] = spec['mesh_server']
+                clone.pop('dialer_proxy', None)
+                clone['dialer-proxy'] = spec['dialer']
+                host_clones.append(clone)
+                mesh.append(cname)
+        mesh_only = [m for m in spec['mesh_only'] if m in by_name and m not in mapping]
+        members = public + mesh + mesh_only
+        if len(members) < 2:
+            continue
+        clones.extend(host_clones)
+        taken.update(mesh)
+        taken.add(gname)
+        groups.append({
+            'name': gname,
+            'type': 'fallback',
+            'hidden': True,
+            'url': CLIENT_GROUP_TEST_URL,
+            'interval': GRADIENT_PROBE_INTERVAL,
+            'lazy': False,
+            'proxies': members,
+        })
+        for m in public + mesh_only:
+            mapping[m] = gname
+    return clones, groups, mapping
+
+
+def _dedupe_keep_order(items: List[str]) -> List[str]:
+    seen: Set[str] = set()
+    out: List[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def collapse_to_gradients(members: List[str], mapping: Dict[str, str]) -> List[str]:
+    """Replace host nodes by their gradient group (first-occurrence position, deduped)."""
+    out: List[str] = []
+    for m in members:
+        target = mapping.get(m, m)
+        if target not in out:
+            out.append(target)
+    return out
 
 FETCH_MAX_BYTES = 8 * 1024 * 1024
 NODE_PROBE_TIMEOUT_SEC = 1.5
@@ -1927,6 +2065,7 @@ class SubscriptionEngine:
     def __init__(self, root: Optional[Path] = None):
         self.root, self.meta_file, self.raw_cache_dir, self.merged_output_file, self.lock_file, self.disabled_file = get_paths(root)
         self.local_nodes_file = self.root / 'airports' / 'local-nodes.yaml'
+        self.mesh_gradients_file = self.root / 'airports' / MESH_GRADIENTS_FILE_NAME
         self.client_export_file = self.root / 'airports' / 'mango-clash.yaml'
         self.client_export_meta_file = self.root / 'airports' / 'mango-clash.meta.json'
 
@@ -2864,8 +3003,12 @@ class SubscriptionEngine:
         if group_hidden:
             available = available - group_hidden
             names = [n for n in names if n not in group_hidden] or ['DIRECT']
-        auto_members = [n for n in names if n not in auto_excluded] or ['DIRECT']
-        select_members = ['AUTO'] + names + ['DIRECT']
+        gradient_nodes, gradient_groups, gradient_of = build_self_gradients(
+            load_mesh_gradients(self.mesh_gradients_file), proxies)
+        proxies.extend(gradient_nodes)
+        auto_members = collapse_to_gradients(
+            [n for n in names if n not in auto_excluded], gradient_of) or ['DIRECT']
+        select_members = ['AUTO'] + collapse_to_gradients(names, gradient_of) + ['DIRECT']
         google_fallback = [n for n in names if _is_us_google_node(n)]
         google_members = resolve_simple_group(
             simple_groups,
@@ -2873,6 +3016,7 @@ class SubscriptionEngine:
             available,
             fallback=google_fallback,
         ) or ['PROXY']
+        google_members = collapse_to_gradients(google_members, gradient_of)
         claude_fallback = [n for n in names if _is_us_claude_node(n)]
         claude_members = resolve_simple_group(
             simple_groups,
@@ -2895,6 +3039,13 @@ class SubscriptionEngine:
             available,
             fallback=openai_fallback,
         ) or ['PROXY']
+        # REV 18: 🎯美国 = groups.us(若声明) 否则 claude -> meta -> openai 并集(保序),
+        # fallback 语义下首个成员即首选出口, 故 claude 优选清单打头。
+        explicit_us = resolve_simple_group(simple_groups, LOCAL_GROUP_US, available) \
+            if LOCAL_GROUP_US in simple_groups else []
+        us_pool = explicit_us or (claude_members + meta_members + openai_members)
+        us_members = collapse_to_gradients(
+            [m for m in us_pool if m != 'PROXY'], gradient_of) or ['PROXY']
 
         home_members = []
         for bare in CLIENT_HOME_GROUP_FALLBACK:
@@ -2929,26 +3080,26 @@ class SubscriptionEngine:
                 {
                     'name': 'AUTO',
                     'type': 'url-test',
+                    # REV 18: 仅作 PROXY 的自动择优成员, 面板不单独暴露
+                    'hidden': True,
                     'url': 'http://www.gstatic.com/generate_204',
                     'interval': 300,
                     'tolerance': 50,
                     'proxies': auto_members,
                 },
                 # 2026-11-27 REV 17: 业务组成员是人工优选清单, 只在组内故障转移,
-                # 不引入组外兜底。Google 按延迟择优; Claude/Meta/OpenAI 风控敏感,
+                # 不引入组外兜底。Google 按延迟择优; 🎯美国(Claude/Meta/OpenAI)风控敏感,
                 # fallback 按清单顺序粘住首个可用节点, 仅其失效时才切换出口 IP。
                 _business_group(GOOGLE_GROUP, 'url-test', google_members,
                                 CLIENT_GOOGLE_TEST_URL),
-                _business_group(CLAUDE_GROUP, 'fallback', claude_members),
-                _business_group(META_GROUP, 'fallback', meta_members),
-                _business_group(OPENAI_GROUP, 'fallback', openai_members),
+                _business_group(US_GROUP, 'fallback', us_members),
                 {
                     'name': HOME_GROUP,
                     'type': 'select',
                     'proxies': home_members,
                 },
-            ],
-            'rules': (
+            ] + gradient_groups,
+            'rules': _dedupe_keep_order(
                 list(CLIENT_DOMESTIC_MEDIA_RULES)
                 + list(CLIENT_STUN_RULES)
                 + build_client_direct_rules(self_cidrs)
@@ -3006,6 +3157,7 @@ class SubscriptionEngine:
             CLIENT_EXPORT_RENDER_REV,
             'allow-lan=' + ('1' if client_allow_lan() else '0'),
             'local=' + sha256_file(self.local_nodes_file),
+            'mesh-gradients=' + sha256_file(self.mesh_gradients_file),
             'merged=' + sha256_file(self.merged_output_file),
             'disabled=' + sha256_file(self.disabled_file),
             # 自建域名节点换 IP 时输入文件不变, 把推导结果纳入指纹才会重渲染
