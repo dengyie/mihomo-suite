@@ -745,6 +745,12 @@ def test_render_client_clash_config_includes_dns_and_local_nodes(temp_clash_root
     assert "DST-PORT,3478,PROXY" in doc["rules"]
     assert "DOMAIN,accounts.google.com,🎯Google" in doc["rules"]
     assert "DOMAIN-SUFFIX,google.com,🎯Google" in doc["rules"]
+    # Google AI endpoints outside the google.com/googleapis.com suffixes
+    for rule in ("DOMAIN,ai.google.dev,🎯Google", "DOMAIN-SUFFIX,gemini.google,🎯Google",
+                 "DOMAIN-SUFFIX,ai.studio,🎯Google", "DOMAIN-SUFFIX,deepmind.com,🎯Google",
+                 "DOMAIN-SUFFIX,stitch.withgoogle.com,🎯Google"):
+        assert rule in doc["rules"]
+        assert doc["rules"].index(rule) < doc["rules"].index("DOMAIN-SUFFIX,google.com,🎯Google")
     assert doc["rules"][-1] == "MATCH,PROXY"
     assert doc["tun"]["enable"] is True
     assert doc["tun"]["stack"] == "gvisor"
@@ -2968,7 +2974,7 @@ def test_load_mesh_gradients_tolerates_bad_file(tmp_path):
 
 def test_client_export_render_rev_pinned():
     """唯一的 REV 钉子: 改了客户端渲染形状就在这里同步 bump(会使客户端缓存失效)。"""
-    assert sm.CLIENT_EXPORT_RENDER_REV == "21"
+    assert sm.CLIENT_EXPORT_RENDER_REV == "22"
 
 
 def test_gradient_group_fails_over_fast():

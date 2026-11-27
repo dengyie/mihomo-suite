@@ -70,7 +70,8 @@ CLIENT_EXPORT_TOKEN_MODE = 0o640
 # 2026-11-27: REV '20' - mesh 克隆钉住公网 SNI/ws Host; 梯度组跳过 CLIENT_HIDE_FROM_GROUPS 节点
 # 2026-11-27: REV '21' - 梯度组 60s 探测 + max-failed-times 2: 客户端出境 UDP 被丢时
 #   尽快切到 TCP/EasyTier mesh, 不再卡在已死的 TUIC 上等 120s 周期探测
-CLIENT_EXPORT_RENDER_REV = '21'
+# 2026-11-27: REV '22' - 🎯Google 补 Gemini/AI Studio/NotebookLM/Antigravity 等 Google AI 域名
+CLIENT_EXPORT_RENDER_REV = '22'
 # 客户端订阅保留节点定义(本地 Merge.yaml listeners 等直接引用); 裸 AWS 节点不进
 # AUTO/业务组(本地 Script.js 以梯度 fallback 组替代), REV 19 起仅在 PROXY 全量手选中暴露。
 CLIENT_HIDE_FROM_GROUPS = frozenset({
@@ -372,7 +373,67 @@ CLIENT_OPENAI_RULES = [
     'DOMAIN-SUFFIX,oaiusercontent.com,' + OPENAI_GROUP,
     'DOMAIN-SUFFIX,auth0.openai.com,' + OPENAI_GROUP,
 ]
+# 2026-11-27: Gemini / AI Studio / NotebookLM / Antigravity / Jules / Labs 等 Google AI
+# 端点(用户提供清单)。新 gTLD(.google/.goog/ai.studio/gemma.ai)与 deepmind.com /
+# withgoogle.com / google.dev 不在下方 google.com/googleapis.com 后缀覆盖内, 原来落 MATCH,PROXY。
+# 被后缀覆盖的条目照单保留: 显式清单便于对账, 排在通用 Google 规则之前。
+CLIENT_GOOGLE_AI_DOMAINS = (
+    'ai.google.dev',
+    'alkalicore-pa.clients6.google.com',
+    'alkalimakersuite-pa.clients6.google.com',
+    'webchannel-alkalimakersuite-pa.clients6.google.com',
+    'geminiweb-pa.clients.google.com',
+    'geminiweb-pa.clients6.google.com',
+    'appsgenaiserver-pa.clients.google.com',
+    'appsgenaiserver-pa.clients6.google.com',
+    'appsgenaiserver-pa.googleapis.com',
+    'cloudaicompanion.googleapis.com',
+    'cloudcode-pa.googleapis.com',
+    'daily-cloudcode-pa.googleapis.com',
+    'notebooklm-pa.googleapis.com',
+    'notebooklm.googleapis.com',
+    'antigravity-pa.googleapis.com',
+    'antigravity.googleapis.com',
+)
+CLIENT_GOOGLE_AI_SUFFIXES = (
+    'notebook.google',
+    'deepmind.google',
+    'gemma.ai',
+    'antigravity-unleash.goog',
+    'antigravity.google',
+    'opal.google',
+    'generativeai.google',
+    'flow.google',
+    'ai.studio',
+    'labs.google',
+    'jules.google',
+    'gemini.google',
+    'notebooklm.google',
+    'deepmind.com',
+    'notebook.google.com',
+    'makersuite.google.com',
+    'gemini.gstatic.com',
+    'gemini.google.com',
+    'notebooklm.google.com',
+    'bard.google.com',
+    'jules.google.com',
+    'aistudio.google.com',
+    'labs.google.com',
+    'geller-pa.googleapis.com',
+    'flow.google.com',
+    'aisandbox-pa.googleapis.com',
+    'aicode.googleapis.com',
+    'aida.googleapis.com',
+    'robinfrontend-pa.googleapis.com',
+    'opal.google.com',
+    'proactivebackend-pa.googleapis.com',
+    'generativelanguage.googleapis.com',
+    'stitch.withgoogle.com',
+    'labstailwind.pa.googleapis.com',
+)
 CLIENT_GOOGLE_RULES = [
+    *('DOMAIN,' + d + ',' + GOOGLE_GROUP for d in CLIENT_GOOGLE_AI_DOMAINS),
+    *('DOMAIN-SUFFIX,' + d + ',' + GOOGLE_GROUP for d in CLIENT_GOOGLE_AI_SUFFIXES),
     'DOMAIN,accounts.google.com,' + GOOGLE_GROUP,
     'DOMAIN,accounts.youtube.com,' + GOOGLE_GROUP,
     'DOMAIN,oauth2.googleapis.com,' + GOOGLE_GROUP,
