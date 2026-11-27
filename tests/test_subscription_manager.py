@@ -806,7 +806,6 @@ def test_client_clash_export_webrtc_stun_and_media_rules_ordering(temp_clash_roo
     assert idx_media < idx_stun_domain
     assert idx_stun_domain < idx_cf
     assert idx_stun_port < idx_cf
-    assert sm.CLIENT_EXPORT_RENDER_REV == "19"
 
 
 def test_client_home_broadband_group_routes_hybgzs(temp_clash_root):
@@ -1120,7 +1119,6 @@ def test_client_bare_aws_only_in_proxy_select(temp_clash_root):
             continue
         assert aws_jp not in g.get("proxies", []), g["name"]
         assert aws_us not in g.get("proxies", []), g["name"]
-    assert sm.CLIENT_EXPORT_RENDER_REV == "19"
 
 
 def test_skip_merge_subscription_stays_out_of_merged(temp_clash_root, monkeypatch):
@@ -2838,3 +2836,61 @@ def test_load_mesh_gradients_tolerates_bad_file(tmp_path):
     bad.write_text("hosts: [::\n", encoding="utf-8")
     assert sm.load_mesh_gradients(bad) == []
     assert sm.load_mesh_gradients(tmp_path / "missing.yaml") == []
+
+
+def test_client_export_render_rev_pinned():
+    """唯一的 REV 钉子: 改了客户端渲染形状就在这里同步 bump(会使客户端缓存失效)。"""
+    assert sm.CLIENT_EXPORT_RENDER_REV == "20"
+
+
+# ---------------------------------------------------------------- REV 20 mesh clone identity
+def test_mesh_clone_pins_sni_and_ws_host_to_public_hostname():
+    vless_ws = {"type": "vless", "server": "10.0.0.4", "tls": True, "network": "ws",
+                "ws-opts": {"path": "/x"}}
+    sm.pin_mesh_clone_identity(vless_ws, "edge.example.com")
+    assert vless_ws["servername"] == "edge.example.com"
+    assert vless_ws["ws-opts"] == {"path": "/x", "headers": {"Host": "edge.example.com"}}
+
+    anytls = {"type": "anytls", "server": "10.0.0.4"}
+    sm.pin_mesh_clone_identity(anytls, "edge.example.com")
+    assert anytls["sni"] == "edge.example.com"
+
+    # explicit values win; IP-literal originals send no SNI -> untouched
+    keep = {"type": "trojan", "server": "10.0.0.4", "sni": "cdn.example.com",
+            "network": "ws", "ws-opts": {"headers": {"host": "h.example.com"}}}
+    sm.pin_mesh_clone_identity(keep, "edge.example.com")
+    assert keep["sni"] == "cdn.example.com" and keep["ws-opts"]["headers"] == {"host": "h.example.com"}
+    ip = {"type": "anytls", "server": "10.0.0.4"}
+    sm.pin_mesh_clone_identity(ip, "192.0.2.1")
+    assert "sni" not in ip
+    plain = {"type": "vless", "server": "10.0.0.4", "network": "tcp"}
+    sm.pin_mesh_clone_identity(plain, "edge.example.com")
+    assert "servername" not in plain
+
+
+def test_client_gradient_mesh_clone_without_sni_keeps_hostname(temp_clash_root):
+    _rev18_local_nodes(temp_clash_root)
+    nodes_file = temp_clash_root / "airports" / "local-nodes.yaml"
+    data = yaml.safe_load(nodes_file.read_text(encoding="utf-8"))
+    for p in data["proxies"]:
+        if p["name"] == _GVPS_ANYTLS:
+            p.pop("sni")
+    nodes_file.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+    doc = yaml.safe_load(SubscriptionEngine(root=temp_clash_root).render_client_clash_config(fetch_remote=False))
+    nodes = {p["name"]: p for p in doc["proxies"]}
+    clone = nodes[_GVPS_ANYTLS + "·mesh"]
+    assert clone["server"] == "10.0.0.4" and clone["sni"] == "vps.example.com"
+    assert "sni" not in nodes[_GVPS_ANYTLS]
+
+
+def test_build_self_gradients_skips_excluded_members():
+    proxies = [
+        {"name": "a", "type": "anytls", "server": "a.example.com", "port": 1},
+        {"name": "b", "type": "anytls", "server": "b.example.com", "port": 2},
+        {"name": _MESH_SOCKS, "type": "socks5", "server": "127.0.0.1", "port": 11080},
+    ]
+    spec = [{"name": "H-梯度", "mesh_server": "10.0.0.7", "members": ["a", "b"],
+             "mesh_only": [], "dialer": _MESH_SOCKS}]
+    clones, groups, mapping = sm.build_self_gradients(spec, proxies, exclude={"b"})
+    assert groups[0]["proxies"] == ["a", "a·mesh"]
+    assert "b" not in mapping and [c["name"] for c in clones] == ["a·mesh"]

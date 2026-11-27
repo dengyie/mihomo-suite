@@ -90,6 +90,24 @@ if [ "$n_same" -gt 0 ]; then for f in "${SAME[@]}"; do log "  SAME     $f"; done
 if [ "$n_diff" -gt 0 ]; then for f in "${DIFF[@]}"; do log "  DIFF     $f"; done; fi
 if [ "$n_missing" -gt 0 ]; then for f in "${MISSING[@]}"; do log "  MISSING  $f"; done; fi
 
+# Mac Script.js keeps a generated copy of each host's mesh IP (the subscriber tier
+# strips the ·mesh clones). Warn-only: the Mac is not a managed file, but a stale
+# table silently kills the mesh fallback. Fix with scripts/sync-mac-mesh-gradients.py.
+MAC_SCRIPT=${MAC_SCRIPT_JS:-"$HOME/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/profiles/Script.js"}
+if [ -f "$MAC_SCRIPT" ]; then
+  mesh_spec=$(mktemp)
+  if ssh -o BatchMode=yes "$HOST" "cat '$REMOTE_DIR/airports/mesh-gradients.yaml'" >"$mesh_spec" 2>/dev/null; then
+    if python3 "$REPO_ROOT/scripts/sync-mac-mesh-gradients.py" --spec "$mesh_spec" --script "$MAC_SCRIPT" --check >/dev/null 2>&1; then
+      log "mac Script.js mesh table: in sync"
+    else
+      warn "mac Script.js SELF_MESH_GRADIENTS drifted from $HOST mesh-gradients.yaml — run scripts/sync-mac-mesh-gradients.py"
+    fi
+  else
+    warn "could not read $HOST:$REMOTE_DIR/airports/mesh-gradients.yaml for the mac drift check"
+  fi
+  rm -f "$mesh_spec"
+fi
+
 if [ "$MODE" = check ]; then
   if [ "$n_diff" -eq 0 ] && [ "$n_missing" -eq 0 ]; then
     log "no drift"

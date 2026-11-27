@@ -67,7 +67,8 @@ CLIENT_EXPORT_TOKEN_MODE = 0o640
 #   每台自建主机一个隐藏梯度 fallback 组(公网变体 -> EasyTier mesh 兜底, 见 mesh-gradients.yaml),
 #   PROXY/AUTO/业务组内同主机裸节点折叠为该梯度组
 # 2026-11-27: REV '19' - 裸 AWS(CLIENT_HIDE_FROM_GROUPS)回到 PROXY 全量手选, 仍不进 AUTO/业务组
-CLIENT_EXPORT_RENDER_REV = '19'
+# 2026-11-27: REV '20' - mesh 克隆钉住公网 SNI/ws Host; 梯度组跳过 CLIENT_HIDE_FROM_GROUPS 节点
+CLIENT_EXPORT_RENDER_REV = '20'
 # 客户端订阅保留节点定义(本地 Merge.yaml listeners 等直接引用); 裸 AWS 节点不进
 # AUTO/业务组(本地 Script.js 以梯度 fallback 组替代), REV 19 起仅在 PROXY 全量手选中暴露。
 CLIENT_HIDE_FROM_GROUPS = frozenset({
@@ -803,17 +804,61 @@ def load_mesh_gradients(path: Path) -> List[Dict[str, Any]]:
     return specs
 
 
+# TLS 握手名字段: vless/vmess 用 servername, 其余(trojan/anytls/tuic/hy2...)用 sni。
+_SERVERNAME_TLS_TYPES = frozenset({'vless', 'vmess'})
+_ALWAYS_TLS_TYPES = frozenset({'trojan', 'anytls', 'tuic', 'hysteria', 'hysteria2'})
+
+
+def _is_ip_literal(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host.strip('[]'))
+        return True
+    except ValueError:
+        return False
+
+
+def pin_mesh_clone_identity(clone: Dict[str, Any], original_server: str) -> None:
+    """Keep the clone's TLS SNI / ws Host equal to the public hostname.
+
+    mihomo falls back to ``server`` for SNI and the ws Host header when they
+    are unset; a mesh clone rewrites ``server`` to a private mesh IP, so an
+    unset field would silently become ``10.x.x.x`` and break the handshake.
+    IP-literal originals send no SNI anyway, so there is nothing to pin.
+    """
+    host = str(original_server or '').strip()
+    if not host or _is_ip_literal(host):
+        return
+    ptype = str(clone.get('type') or '').lower()
+    if ptype in _SERVERNAME_TLS_TYPES:
+        if clone.get('tls') and not clone.get('servername'):
+            clone['servername'] = host
+    elif ptype in _ALWAYS_TLS_TYPES or clone.get('tls'):
+        if not clone.get('sni'):
+            clone['sni'] = host
+    if str(clone.get('network') or '').lower() == 'ws':
+        ws = dict(clone.get('ws-opts') or {})
+        headers = dict(ws.get('headers') or {})
+        if not any(str(k).lower() == 'host' for k in headers):
+            headers['Host'] = host
+            ws['headers'] = headers
+            clone['ws-opts'] = ws
+
+
 def build_self_gradients(
     specs: List[Dict[str, Any]],
     proxies: List[Dict[str, Any]],
+    exclude: Optional[Set[str]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, str]]:
     """Return (mesh clone nodes, hidden gradient groups, member -> group map).
 
-    Members absent from ``proxies`` (disabled / renamed) are skipped; a host
-    left with fewer than two candidates gets no group (nothing to fail over
-    to) and its node stays referenced directly.
+    Members absent from ``proxies`` (disabled / renamed) or listed in
+    ``exclude`` (group-hidden nodes) are skipped; a host left with fewer than
+    two candidates gets no group (nothing to fail over to) and its node stays
+    referenced directly.
     """
-    by_name = {str(p.get('name')): p for p in proxies if isinstance(p, dict)}
+    excluded = set(exclude or ())
+    by_name = {str(p.get('name')): p for p in proxies
+               if isinstance(p, dict) and str(p.get('name')) not in excluded}
     taken = set(by_name)
     clones: List[Dict[str, Any]] = []
     groups: List[Dict[str, Any]] = []
@@ -839,6 +884,7 @@ def build_self_gradients(
                 clone['server'] = spec['mesh_server']
                 clone.pop('dialer_proxy', None)
                 clone['dialer-proxy'] = spec['dialer']
+                pin_mesh_clone_identity(clone, str(node.get('server') or ''))
                 host_clones.append(clone)
                 mesh.append(cname)
         mesh_only = [m for m in spec['mesh_only'] if m in by_name and m not in mapping]
@@ -3008,7 +3054,7 @@ class SubscriptionEngine:
             available = available - group_hidden
             names = [n for n in names if n not in group_hidden] or ['DIRECT']
         gradient_nodes, gradient_groups, gradient_of = build_self_gradients(
-            load_mesh_gradients(self.mesh_gradients_file), proxies)
+            load_mesh_gradients(self.mesh_gradients_file), proxies, exclude=group_hidden)
         proxies.extend(gradient_nodes)
         auto_members = collapse_to_gradients(
             [n for n in names if n not in auto_excluded], gradient_of) or ['DIRECT']
