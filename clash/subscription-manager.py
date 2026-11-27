@@ -1901,6 +1901,28 @@ def filter_nodes(nodes: List[Dict[str, Any]], exclude_pattern: Optional[str] = N
     return valid_nodes
 
 
+DEFAULT_SUB_FETCH_PROXIES = (
+    'http://127.0.0.1:10818,http://127.0.0.1:10822,http://127.0.0.1:7897'
+)
+
+
+def _sub_fetch_proxies() -> List[str]:
+    """Ordered proxy list from ``SUB_FETCH_PROXY`` (comma separated).
+
+    ``none``/``off``/``0``/``false``/empty disables the proxy fallback.
+    A single value keeps working as before.
+    """
+    raw = os.environ.get('SUB_FETCH_PROXY', DEFAULT_SUB_FETCH_PROXIES).strip()
+    if raw.lower() in ('none', 'off', '0', 'false', ''):
+        return []
+    out: List[str] = []
+    for item in raw.split(','):
+        item = item.strip()
+        if item and item not in out:
+            out.append(item)
+    return out
+
+
 def apply_node_name_prefix(nodes: List[Dict[str, Any]], sub_name: str) -> List[Dict[str, Any]]:
     """Add sub_name prefix to avoid name collision between subscriptions."""
     prefix = f"[{sub_name}] "
@@ -2157,8 +2179,8 @@ class SubscriptionEngine:
             raise ValueError(f"SSRF check failed: {err}")
 
         user_agent = 'ClashMeta/v1.18.0 mihomo/1.18.0'
-        proxy_env = os.environ.get('SUB_FETCH_PROXY', 'http://127.0.0.1:7897').strip()
-        proxy_disabled = proxy_env.lower() in ('none', 'off', '0', 'false', '')
+        proxies = _sub_fetch_proxies()
+        proxy_disabled = not proxies
 
         direct_timeout = min(timeout, 8) if not proxy_disabled else timeout
         direct_err: Optional[Exception] = None
@@ -2181,31 +2203,41 @@ class SubscriptionEngine:
             if isinstance(e, ValueError) and 'redirect refused' in str(e):
                 raise
 
-        if not proxy_disabled and proxy_env:
+        # Proxies are tried in order. A host in mainland China can have both
+        # the direct path (DNS poisoning / SNI reset) and the general 7897
+        # mixed port (AUTO may currently pick a domestic node) fail, so the
+        # default list puts fixed overseas listeners first; on hosts that do
+        # not run them the connect is refused instantly and the next is tried.
+        proxy_errors: List[str] = []
+        for proxy_url in proxies:
             _LOG.info(
-                "Subscription direct fetch failed for %s (%s); falling back to proxy %s",
-                url,
+                "Subscription direct fetch failed (%s); trying proxy %s",
                 direct_err,
-                proxy_env,
+                proxy_url,
             )
             try:
                 status, headers, raw = _http_get_via_proxy(
                     url,
-                    proxy_url=proxy_env,
+                    proxy_url=proxy_url,
                     timeout=timeout,
                     user_agent=user_agent,
                 )
-                if 300 <= status < 400:
-                    raise ValueError(
-                        f"HTTP {status} redirect refused (subscription fetches do not follow redirects)"
-                    )
-                if status != 200:
-                    raise ValueError(f"HTTP {status} fetching subscription via proxy")
-                return raw.decode('utf-8', errors='ignore')
             except Exception as proxy_err:
+                proxy_errors.append(f"{proxy_url}: {proxy_err}")
+                continue
+            if 300 <= status < 400:
                 raise ValueError(
-                    f"Fetch failed (direct: {direct_err}; proxy fallback: {proxy_err})"
-                ) from proxy_err
+                    f"HTTP {status} redirect refused (subscription fetches do not follow redirects)"
+                )
+            if status != 200:
+                proxy_errors.append(f"{proxy_url}: HTTP {status} fetching subscription via proxy")
+                continue
+            return raw.decode('utf-8', errors='ignore')
+
+        if proxy_errors:
+            raise ValueError(
+                f"Fetch failed (direct: {direct_err}; proxy fallback: {'; '.join(proxy_errors)})"
+            )
 
         if direct_err:
             raise direct_err
@@ -2400,6 +2432,7 @@ class SubscriptionEngine:
                     fetch_error = f"Fetch failed: {e}"
 
         pending_inject: Optional[List[Dict[str, Any]]] = None
+        prune_plan: Optional[Dict[str, Any]] = None
         with ClashConfigLock(self.lock_file):
             data = self.load_meta()
             sub = next((s for s in data.get('subscriptions', []) if s.get('id') == sub_id), None)
@@ -2413,6 +2446,7 @@ class SubscriptionEngine:
                     try:
                         nodes = parse_subscription_content(content)
                         filtered = filter_nodes(nodes, sub.get('exclude_filter'))
+                        prev_node_count = sub.get('node_count')
                         sub['node_count'] = len(filtered)
                         want_inject = (
                             bool(inject_local)
@@ -2423,6 +2457,14 @@ class SubscriptionEngine:
                             pending_inject = apply_node_name_prefix(
                                 filtered, sub.get('name', sub_id)
                             )
+                            if fetch_error is None:
+                                prune_plan = {
+                                    'sub_name': sub.get('name', sub_id),
+                                    'upstream': {
+                                        str(n.get('name') or '').strip() for n in pending_inject
+                                    },
+                                    'prev_count': prev_node_count,
+                                }
                     except Exception as e:
                         sub['last_error'] = f"Parse failed: {e}"
                 elif fetch_error is None and not (sub.get('type') == 'raw' or sub.get('raw_content')):
@@ -2444,12 +2486,22 @@ class SubscriptionEngine:
                 probe=probe,
                 target_group=target_group,
             )
+            prune_result: Optional[Dict[str, Any]] = None
+            if prune_plan:
+                try:
+                    prune_result = self._prune_upstream_removed(**prune_plan)
+                except Exception as e:  # pruning is best-effort; never fail a refresh
+                    _LOG.warning("upstream-removed prune skipped: %s", e)
+                    prune_result = {'pruned': [], 'skipped': f'error: {e}'}
+                inject_result['upstream_pruned'] = prune_result
             with ClashConfigLock(self.lock_file):
                 data = self.load_meta()
                 for item in data.get('subscriptions', []):
                     if item.get('id') == sub_id:
                         item['injected_alive'] = inject_result.get('injected', 0)
                         item['injected_dead'] = inject_result.get('dead', 0)
+                        if prune_result is not None:
+                            item['upstream_pruned'] = len(prune_result.get('pruned') or [])
                         sub = item
                         break
                 self.save_meta(data)
@@ -2467,6 +2519,111 @@ class SubscriptionEngine:
         result = {'success': True, 'subscription': sub}
         if inject_result is not None:
             result['inject'] = inject_result
+        return result
+
+    def _live_referenced_proxy_names(self) -> set:
+        """Proxy names that live configs reference outside proxy-groups.
+
+        apply-local-import rewrites dangling *group* members, but rules
+        (``IN-USER,key,<node>``), ``listeners[].proxy`` and another node's
+        ``dialer-proxy`` are left as-is; removing a node they name would make
+        mihomo reject the whole config on reload. Such nodes are never pruned.
+        """
+        refs: set = set()
+        docs = []
+        for path in (self.root / 'config.yaml', self.root / 'config.mac-merged.yaml'):
+            try:
+                if path.exists():
+                    loaded = yaml.safe_load(path.read_text(encoding='utf-8'))
+                    if isinstance(loaded, dict):
+                        docs.append(loaded)
+            except Exception:
+                # An unreadable live config means we cannot prove safety.
+                raise RuntimeError(f"cannot read {path.name} to check references")
+        try:
+            local_doc = load_local_nodes_document(self.local_nodes_file)
+            docs.append({'proxies': local_doc['proxies']})
+        except Exception:
+            pass
+        for doc in docs:
+            for rule in doc.get('rules') or []:
+                if isinstance(rule, str):
+                    refs.update(part.strip() for part in rule.split(','))
+            for sub_rules in (doc.get('sub-rules') or {}).values() if isinstance(doc.get('sub-rules'), dict) else []:
+                for rule in sub_rules or []:
+                    if isinstance(rule, str):
+                        refs.update(part.strip() for part in rule.split(','))
+            for listener in doc.get('listeners') or []:
+                if isinstance(listener, dict) and listener.get('proxy'):
+                    refs.add(str(listener['proxy']))
+            for proxy in doc.get('proxies') or []:
+                if isinstance(proxy, dict) and proxy.get('dialer-proxy'):
+                    refs.add(str(proxy['dialer-proxy']))
+        return refs
+
+    def _prune_upstream_removed(
+        self,
+        sub_name: Optional[str],
+        upstream: set,
+        prev_count: Any = None,
+    ) -> Dict[str, Any]:
+        """Remove ``[<sub>] `` nodes that the upstream subscription no longer lists.
+
+        Only called after a successful fetch with a non-empty parse. Guards:
+        a sharp shrink of the upstream list (below ``SUB_PRUNE_MIN_RATIO`` of
+        the previous count, default 0.5) is treated as an upstream glitch and
+        nothing is pruned; ``[自建] `` nodes are never touched; nodes that live
+        rules/listeners/dialer-proxy reference are kept and reported. A removed
+        node is re-added by the next refresh if the upstream lists it again.
+        """
+        result: Dict[str, Any] = {'pruned': [], 'protected': [], 'skipped': None}
+        if not sub_name or not upstream:
+            result['skipped'] = 'empty upstream'
+            return result
+        prefix = f"[{sub_name}] "
+        if prefix == SELF_TAG:
+            result['skipped'] = 'self-built subscription'
+            return result
+        try:
+            ratio = float(os.environ.get('SUB_PRUNE_MIN_RATIO', '0.5'))
+        except ValueError:
+            ratio = 0.5
+        try:
+            prev = int(prev_count or 0)
+        except (TypeError, ValueError):
+            prev = 0
+        if prev > 0 and len(upstream) < prev * ratio:
+            result['skipped'] = f'upstream shrank {prev}->{len(upstream)}'
+            return result
+
+        with ClashConfigLock(self.lock_file):
+            doc = load_local_nodes_document(self.local_nodes_file)
+            gone = [
+                str(p.get('name') or '')
+                for p in doc['proxies']
+                if str(p.get('name') or '').startswith(prefix)
+                and not str(p.get('name') or '').startswith(SELF_TAG)
+                and str(p.get('name') or '') not in upstream
+            ]
+            if not gone:
+                return result
+            refs = self._live_referenced_proxy_names()
+            protected = [n for n in gone if n in refs]
+            drop = set(gone) - set(protected)
+            result['protected'] = protected
+            if drop:
+                kept = [p for p in doc['proxies'] if str(p.get('name') or '') not in drop]
+                groups = {
+                    gname: [n for n in names if str(n) not in drop]
+                    for gname, names in doc['groups'].items()
+                }
+                save_local_nodes_file(self.local_nodes_file, kept, groups=groups)
+                result['pruned'] = sorted(drop)
+        if result['pruned'] or result['protected']:
+            _LOG.info(
+                "upstream-removed prune [%s]: pruned=%d protected=%d",
+                sub_name, len(result['pruned']), len(result['protected']),
+            )
         return result
 
     def _retract_prefixed_nodes(self, sub_name: Optional[str]) -> int:

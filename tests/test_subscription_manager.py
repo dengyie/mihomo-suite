@@ -1245,7 +1245,65 @@ def test_fetch_url_proxy_fallback_logs(temp_clash_root, monkeypatch, caplog):
                         timeout=15,
                         user_agent="ClashMeta/v1.18.0 mihomo/1.18.0",
                     )
-                    assert any("falling back to proxy 127.0.0.1:7897" in record.message for record in caplog.records)
+                    assert any("trying proxy 127.0.0.1:7897" in record.message for record in caplog.records)
+
+
+def test_sub_fetch_proxies_parses_ordered_list(monkeypatch):
+    monkeypatch.delenv("SUB_FETCH_PROXY", raising=False)
+    assert sm._sub_fetch_proxies() == [
+        "http://127.0.0.1:10818",
+        "http://127.0.0.1:10822",
+        "http://127.0.0.1:7897",
+    ]
+    monkeypatch.setenv("SUB_FETCH_PROXY", " http://127.0.0.1:1 , ,http://127.0.0.1:2,http://127.0.0.1:1")
+    assert sm._sub_fetch_proxies() == ["http://127.0.0.1:1", "http://127.0.0.1:2"]
+    for off in ("none", "OFF", "0", "false", ""):
+        monkeypatch.setenv("SUB_FETCH_PROXY", off)
+        assert sm._sub_fetch_proxies() == []
+
+
+def test_fetch_url_tries_proxies_in_order_until_one_succeeds(temp_clash_root, monkeypatch):
+    monkeypatch.setenv("SUB_FETCH_PROXY", "http://127.0.0.1:1,http://127.0.0.1:2,http://127.0.0.1:3")
+    engine = SubscriptionEngine(root=temp_clash_root)
+    calls = []
+
+    def fake_proxy(url, proxy_url, timeout, user_agent):
+        calls.append(proxy_url)
+        if proxy_url.endswith(":1"):
+            raise ConnectionRefusedError("refused")
+        if proxy_url.endswith(":2"):
+            return 403, {}, b""
+        return 200, {}, b"proxies: []"
+
+    with patch.object(sm, "is_safe_public_url", return_value=(True, "")):
+        with patch.object(sm, "_http_get_pinned", side_effect=ConnectionResetError("reset")):
+            with patch.object(sm, "_http_get_via_proxy", side_effect=fake_proxy):
+                assert engine.fetch_url("https://sub.example/x") == "proxies: []"
+    assert calls == ["http://127.0.0.1:1", "http://127.0.0.1:2", "http://127.0.0.1:3"]
+
+
+def test_fetch_url_all_proxies_fail_reports_each(temp_clash_root, monkeypatch):
+    monkeypatch.setenv("SUB_FETCH_PROXY", "http://127.0.0.1:1,http://127.0.0.1:2")
+    engine = SubscriptionEngine(root=temp_clash_root)
+    with patch.object(sm, "is_safe_public_url", return_value=(True, "")):
+        with patch.object(sm, "_http_get_pinned", side_effect=ConnectionResetError("reset")):
+            with patch.object(sm, "_http_get_via_proxy", side_effect=TimeoutError("slow")):
+                with pytest.raises(ValueError) as exc:
+                    engine.fetch_url("https://sub.example/x")
+    msg = str(exc.value)
+    assert "127.0.0.1:1: slow" in msg and "127.0.0.1:2: slow" in msg
+    assert "sub.example" not in msg
+
+
+def test_fetch_url_proxy_redirect_is_refused_not_retried(temp_clash_root, monkeypatch):
+    monkeypatch.setenv("SUB_FETCH_PROXY", "http://127.0.0.1:1,http://127.0.0.1:2")
+    engine = SubscriptionEngine(root=temp_clash_root)
+    with patch.object(sm, "is_safe_public_url", return_value=(True, "")):
+        with patch.object(sm, "_http_get_pinned", side_effect=ConnectionResetError("reset")):
+            with patch.object(sm, "_http_get_via_proxy", return_value=(302, {}, b"")) as mock_proxy:
+                with pytest.raises(ValueError, match="redirect refused"):
+                    engine.fetch_url("https://sub.example/x")
+    assert mock_proxy.call_count == 1
 
 
 def test_fetch_url_caps_body(temp_clash_root, monkeypatch):
@@ -2932,3 +2990,107 @@ def test_build_self_gradients_skips_excluded_members():
     clones, groups, mapping = sm.build_self_gradients(spec, proxies, exclude={"b"})
     assert groups[0]["proxies"] == ["a", "a·mesh"]
     assert "b" not in mapping and [c["name"] for c in clones] == ["a·mesh"]
+
+
+def _ss_yaml(names):
+    lines = ["proxies:"]
+    for i, n in enumerate(names):
+        lines += [
+            f"  - name: {n}",
+            "    type: ss",
+            f"    server: 192.0.2.{10 + i}",
+            "    port: 8388",
+            "    cipher: aes-128-gcm",
+            "    password: x",
+        ]
+    return "\n".join(lines) + "\n"
+
+
+def _pool_with_nodes(engine, monkeypatch, names):
+    monkeypatch.setattr(sm, "probe_nodes", lambda nodes, **kw: (list(nodes), []))
+    with patch.object(SubscriptionEngine, "fetch_url", return_value=_ss_yaml(names)):
+        added = engine.add_subscription(
+            name="Pool", url="https://sub.example.com/clash", skip_merge=True, inject_local=False
+        )
+        sub_id = added["subscription"]["id"]
+        res = engine.update_subscription(sub_id=sub_id, refresh=True)
+    assert res["success"] is True
+    return sub_id
+
+
+def _local(root):
+    return yaml.safe_load((root / "airports" / "local-nodes.yaml").read_text())
+
+
+def test_refresh_prunes_nodes_removed_upstream(temp_clash_root, monkeypatch):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    sub_id = _pool_with_nodes(engine, monkeypatch, ["A", "B", "C", "D"])
+    # foreign + self-built nodes sharing the file must survive
+    doc = _local(temp_clash_root)
+    doc["proxies"] += [
+        {"name": "[Other] A", "type": "ss", "server": "192.0.2.50", "port": 1, "cipher": "aes-128-gcm", "password": "x"},
+        {"name": "[自建] Box", "type": "ss", "server": "192.0.2.51", "port": 1, "cipher": "aes-128-gcm", "password": "x"},
+    ]
+    doc["groups"]["vps-import"] += ["[Other] A", "[自建] Box"]
+    sm.save_local_nodes_file(temp_clash_root / "airports" / "local-nodes.yaml", doc["proxies"], groups=doc["groups"])
+
+    with patch.object(SubscriptionEngine, "fetch_url", return_value=_ss_yaml(["A", "B", "C"])):
+        res = engine.update_subscription(sub_id=sub_id, refresh=True)
+    assert res["success"] is True
+    assert res["inject"]["upstream_pruned"]["pruned"] == ["[Pool] D"]
+    doc = _local(temp_clash_root)
+    names = {p["name"] for p in doc["proxies"]}
+    assert "[Pool] D" not in names
+    assert {"[Pool] A", "[Pool] B", "[Pool] C", "[Other] A", "[自建] Box"} <= names
+    assert "[Pool] D" not in doc["groups"]["vps-import"]
+    meta = next(s for s in engine.load_meta()["subscriptions"] if s["id"] == sub_id)
+    assert meta["upstream_pruned"] == 1
+
+
+def test_refresh_prune_skips_sharp_upstream_shrink(temp_clash_root, monkeypatch):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    sub_id = _pool_with_nodes(engine, monkeypatch, ["A", "B", "C", "D"])
+    with patch.object(SubscriptionEngine, "fetch_url", return_value=_ss_yaml(["A"])):
+        res = engine.update_subscription(sub_id=sub_id, refresh=True)
+    assert res["inject"]["upstream_pruned"]["pruned"] == []
+    assert "shrank" in res["inject"]["upstream_pruned"]["skipped"]
+    assert len([p for p in _local(temp_clash_root)["proxies"] if p["name"].startswith("[Pool] ")]) == 4
+
+
+def test_refresh_prune_keeps_nodes_referenced_by_live_config(temp_clash_root, monkeypatch):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    sub_id = _pool_with_nodes(engine, monkeypatch, ["A", "B", "C", "D"])
+    (temp_clash_root / "config.yaml").write_text(yaml.safe_dump({
+        "proxies": [{"name": "hop", "type": "ss", "server": "192.0.2.90", "port": 1,
+                     "cipher": "aes-128-gcm", "password": "x", "dialer-proxy": "[Pool] C"}],
+        "listeners": [{"name": "l1", "type": "mixed", "port": 10999, "proxy": "[Pool] B"}],
+        "rules": ["IN-USER,key_0,[Pool] A", "MATCH,PROXY"],
+    }, allow_unicode=True))
+    with patch.object(SubscriptionEngine, "fetch_url", return_value=_ss_yaml(["D", "E", "F"])):
+        res = engine.update_subscription(sub_id=sub_id, refresh=True)
+    pr = res["inject"]["upstream_pruned"]
+    assert pr["pruned"] == []
+    assert sorted(pr["protected"]) == ["[Pool] A", "[Pool] B", "[Pool] C"]
+    names = {p["name"] for p in _local(temp_clash_root)["proxies"]}
+    assert {"[Pool] A", "[Pool] B", "[Pool] C", "[Pool] D", "[Pool] E", "[Pool] F"} <= names
+
+
+def test_refresh_fetch_failure_never_prunes(temp_clash_root, monkeypatch):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    sub_id = _pool_with_nodes(engine, monkeypatch, ["A", "B"])
+    with patch.object(SubscriptionEngine, "fetch_url", side_effect=ValueError("HTTP 502")):
+        res = engine.update_subscription(sub_id=sub_id, refresh=True)
+    assert res["success"] is False
+    assert len([p for p in _local(temp_clash_root)["proxies"] if p["name"].startswith("[Pool] ")]) == 2
+
+
+def test_refresh_prune_unreadable_live_config_prunes_nothing(temp_clash_root, monkeypatch):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    sub_id = _pool_with_nodes(engine, monkeypatch, ["A", "B", "C"])
+    (temp_clash_root / "config.yaml").write_text("rules: [unclosed\n")
+    with patch.object(SubscriptionEngine, "fetch_url", return_value=_ss_yaml(["A", "B"])):
+        res = engine.update_subscription(sub_id=sub_id, refresh=True)
+    assert res["success"] is True
+    assert res["inject"]["upstream_pruned"]["pruned"] == []
+    assert "error" in res["inject"]["upstream_pruned"]["skipped"]
+    assert "[Pool] C" in {p["name"] for p in _local(temp_clash_root)["proxies"]}
