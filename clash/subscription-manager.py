@@ -2472,6 +2472,7 @@ class SubscriptionEngine:
 
         content = ""
         fetch_error: Optional[str] = None
+        refresh_error: Optional[str] = None  # 拿到内容但内容不可用 (空载荷/解析失败)
         if refresh:
             if sub.get('type') == 'raw' or sub.get('raw_content'):
                 content = sub.get('raw_content', '') or ''
@@ -2493,34 +2494,46 @@ class SubscriptionEngine:
             if refresh:
                 sub['last_error'] = fetch_error
                 if content:
-                    self.save_cached_content(sub_id, content)
                     try:
                         nodes = parse_subscription_content(content)
                         filtered = filter_nodes(nodes, sub.get('exclude_filter'))
-                        prev_node_count = sub.get('node_count')
-                        sub['node_count'] = len(filtered)
-                        want_inject = (
-                            bool(inject_local)
-                            if inject_local is not None
-                            else bool(sub.get('skip_merge'))
-                        ) and not sub.get('self_published')
-                        if want_inject and filtered:
-                            pending_inject = apply_node_name_prefix(
-                                filtered, sub.get('name', sub_id)
-                            )
-                            if fetch_error is None:
-                                prune_plan = {
-                                    'sub_name': sub.get('name', sub_id),
-                                    'upstream': {
-                                        str(n.get('name') or '').strip() for n in pending_inject
-                                    },
-                                    'prev_count': prev_node_count,
-                                }
+                        # 空载荷护栏 (review P1-A): 上游 200 但解析出 0 节点
+                        # (配额耗尽/过期面板页也返回这种) 不能当成功——否则
+                        # 覆盖 last-good 缓存 → merged/导出把该机场整体删掉,
+                        # 还睡满 6h 才重试。按失败处理: 保留旧缓存。
+                        if not filtered and not (sub.get('type') == 'raw' or sub.get('raw_content')):
+                            sub['last_error'] = refresh_error = (
+                                'Parse failed: upstream returned 0 usable nodes '
+                                f'(payload {len(content)} bytes)')
+                        else:
+                            self.save_cached_content(sub_id, content)
+                            prev_node_count = sub.get('node_count')
+                            sub['node_count'] = len(filtered)
+                            want_inject = (
+                                bool(inject_local)
+                                if inject_local is not None
+                                else bool(sub.get('skip_merge'))
+                            ) and not sub.get('self_published')
+                            if want_inject and filtered:
+                                pending_inject = apply_node_name_prefix(
+                                    filtered, sub.get('name', sub_id)
+                                )
+                                if fetch_error is None:
+                                    prune_plan = {
+                                        'sub_name': sub.get('name', sub_id),
+                                        'upstream': {
+                                            str(n.get('name') or '').strip() for n in pending_inject
+                                        },
+                                        'prev_count': prev_node_count,
+                                    }
                     except Exception as e:
                         sub['last_error'] = f"Parse failed: {e}"
                 elif fetch_error is None and not (sub.get('type') == 'raw' or sub.get('raw_content')):
-                    if not sub.get('url'):
-                        sub['last_error'] = 'Fetch failed: missing URL'
+                    # 变体: HTTP 200 但空 body 也落到这里。不能静默成功推进
+                    # last_success (review P1-A) —— 记错误, 保留旧缓存。
+                    sub['last_error'] = refresh_error = (
+                        'Fetch failed: empty response' if sub.get('url')
+                        else 'Fetch failed: missing URL')
 
             sub['updatedAt'] = datetime.now(timezone.utc).isoformat()
             self.save_meta(data)
@@ -2557,10 +2570,10 @@ class SubscriptionEngine:
                         break
                 self.save_meta(data)
 
-        if fetch_error:
+        if fetch_error or refresh_error:
             result: Dict[str, Any] = {
                 'success': False,
-                'error': fetch_error,
+                'error': fetch_error or refresh_error,
                 'subscription': sub,
             }
             if inject_result is not None:
@@ -3121,6 +3134,12 @@ class SubscriptionEngine:
                     if content:
                         self.save_cached_content(sub_id, content)
                 elif sub.get('url'):
+                    # fetch_remote=False 的调用方 (gateway /sub/clash 轮询、
+                    # keeper 刷新后的 publish) 承诺绝不回源——缓存缺失 (初次
+                    # fetch 失败的订阅 / 缓存被删) 不能变成每次轮询都 fetch
+                    # 上游 (review P1-B: SSRF 放大器)。跳过并沿用旧数据。
+                    if not fetch_remote:
+                        continue
                     try:
                         content = self.fetch_url(
                             sub['url'], insecure_tls=bool(sub.get('insecure_tls')))

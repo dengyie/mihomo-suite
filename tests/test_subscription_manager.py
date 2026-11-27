@@ -3166,3 +3166,56 @@ def test_self_published_refresh_never_injects_or_prunes(temp_clash_root, monkeyp
         assert _local(temp_clash_root) == before
     res = engine.update_subscription(sub_id=sub_id, self_published=False)
     assert "self_published" not in res["subscription"]
+
+
+# ------------------------------------------------------------- review P1-A/P1-B (2026-11-28)
+def test_empty_upstream_payload_is_failure_not_success(temp_clash_root):
+    """review P1-A: 上游 200 但解析出 0 节点 (配额耗尽页) 不能覆盖缓存/判成功。"""
+    engine = SubscriptionEngine(root=temp_clash_root)
+    good = ("proxies:\n- name: JP-good\n  type: trojan\n"
+            "  server: 192.0.2.10\n  port: 443\n  password: x\n")
+    with patch.object(engine, "fetch_url", return_value=good):
+        added = engine.add_subscription(name="airport", url="https://a.example/s", probe=False)
+    sub_id = added["subscription"]["id"]
+    assert engine.load_cached_content(sub_id) == good
+
+    # 上游返回合法 YAML 但空 proxies (典型配额耗尽/过期面板)
+    with patch.object(engine, "fetch_url", return_value="proxies: []\n"):
+        res = engine.update_subscription(sub_id=sub_id, refresh=True, probe=False)
+    assert res["success"] is False, res
+    assert "0 usable nodes" in (res.get("error") or "")
+    # last-good 缓存必须保留
+    assert engine.load_cached_content(sub_id) == good
+    meta = engine.load_meta()
+    sub = next(s for s in meta["subscriptions"] if s["id"] == sub_id)
+    assert sub["last_error"] and "0 usable nodes" in sub["last_error"]
+    assert sub["node_count"] == 1  # 不被 0 覆盖
+
+
+def test_empty_http_body_is_failure_not_success(temp_clash_root):
+    """review P1-A 变体: HTTP 200 但空 body 不能静默推进成功。"""
+    engine = SubscriptionEngine(root=temp_clash_root)
+    good = ("proxies:\n- name: JP-good\n  type: trojan\n"
+            "  server: 192.0.2.10\n  port: 443\n  password: x\n")
+    with patch.object(engine, "fetch_url", return_value=good):
+        added = engine.add_subscription(name="airport", url="https://a.example/s", probe=False)
+    sub_id = added["subscription"]["id"]
+
+    with patch.object(engine, "fetch_url", return_value=""):
+        res = engine.update_subscription(sub_id=sub_id, refresh=True, probe=False)
+    assert res["success"] is False
+    assert "empty response" in (res.get("error") or "")
+    assert engine.load_cached_content(sub_id) == good
+
+
+def test_publish_no_fetch_never_hits_upstream_when_cache_missing(temp_clash_root):
+    """review P1-B: fetch_remote=False (gateway /sub/clash 轮询) 缓存缺失时不得回源。"""
+    engine = SubscriptionEngine(root=temp_clash_root)
+    with patch.object(engine, "fetch_url", return_value="proxies: []\n"):
+        engine.add_subscription(name="airport", url="https://a.example/s", probe=False)
+    # 删掉缓存, 模拟初次 fetch 失败的订阅 / 缓存被删
+    for p in (temp_clash_root / "subscriptions" / "raw").glob("*"):
+        if "airport" in p.name or p.name.endswith(".raw"):
+            p.unlink()
+    with patch.object(engine, "fetch_url", side_effect=AssertionError("must not fetch upstream")):
+        engine.reconcile_merged(fetch_remote=False, update_targets=False)
