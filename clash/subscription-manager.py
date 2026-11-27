@@ -932,6 +932,9 @@ FETCH_MAX_BYTES = 8 * 1024 * 1024
 NODE_PROBE_TIMEOUT_SEC = 1.5
 NODE_PROBE_MAX_WORKERS = 16
 NODE_PROBE_MAX_CANDIDATES = 200
+# Keys an operator adds to a re-injected airport node in local-nodes.yaml that
+# upstream subscriptions never provide; kept across refreshes unless upstream sets them.
+LOCAL_NODE_OVERLAY_KEYS = ('dialer-proxy',)
 # UDP-only outbound cannot be TCP-probed; keep them when expanding the node file.
 # Parser emits type=hysteria2 for both hysteria2:// and hy2://; hy2 stays as a belt.
 UDP_NODE_TYPES = frozenset({'hysteria', 'hysteria2', 'hy2', 'tuic', 'wireguard'})
@@ -2742,8 +2745,16 @@ class SubscriptionEngine:
                 name = str(node.get('name') or '').strip()
                 if not name or name in disabled:
                     continue
-                if name not in by_name:
+                previous = by_name.get(name)
+                if previous is None:
                     injected += 1
+                else:
+                    # Upstream never carries operator overlays such as a pinned
+                    # dialer-proxy chain; a refresh must not silently drop them.
+                    node = dict(node)
+                    for key in LOCAL_NODE_OVERLAY_KEYS:
+                        if key not in node and key in previous:
+                            node[key] = previous[key]
                 by_name[name] = node
                 # Only include nodes that are routable/usable for target_group
                 # For example, if host has no IPv6, do not put ipv6-skip nodes into vps-import

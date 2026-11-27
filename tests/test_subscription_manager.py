@@ -1426,6 +1426,44 @@ def test_inject_alive_into_local_nodes_with_target_group(temp_clash_root, monkey
     assert local_doc["groups"]["vps-import"] == ["Old-VPS", "New-IPv4"]
 
 
+def test_inject_refresh_keeps_local_dialer_proxy_overlay(temp_clash_root):
+    """A re-fetched node takes upstream fields but keeps the locally pinned dialer.
+
+    Operators chain IPv6-only airport nodes through a self-hosted dialer in
+    local-nodes.yaml; upstream never carries that key, so a plain overwrite on
+    refresh would silently drop the chain and make the node unreachable.
+    """
+    engine = sm.SubscriptionEngine(root=temp_clash_root)
+    (temp_clash_root / "airports").mkdir(parents=True, exist_ok=True)
+    (temp_clash_root / "airports" / "local-nodes.yaml").write_text(
+        yaml.safe_dump({
+            "proxies": [
+                {"name": "[air] V6", "type": "ss", "server": "2001:db8::1", "port": 1,
+                 "dialer-proxy": "Self-Dialer"},
+                {"name": "[air] Own", "type": "ss", "server": "192.0.2.1", "port": 1,
+                 "dialer-proxy": "Self-Dialer"},
+            ],
+            "groups": {"vps-import": ["[air] V6", "[air] Own"]},
+        }),
+        encoding="utf-8",
+    )
+    nodes = [
+        {"name": "[air] V6", "type": "ss", "server": "2001:db8::2", "port": 2},
+        {"name": "[air] Own", "type": "ss", "server": "192.0.2.2", "port": 2,
+         "dialer-proxy": "Upstream-Dialer"},
+    ]
+    engine._inject_alive_into_local_nodes(nodes, probe=False, target_group="vps-import")
+    by_name = {
+        p["name"]: p
+        for p in sm.load_local_nodes_document(temp_clash_root / "airports" / "local-nodes.yaml")["proxies"]
+    }
+    assert by_name["[air] V6"]["server"] == "2001:db8::2"
+    assert by_name["[air] V6"]["port"] == 2
+    assert by_name["[air] V6"]["dialer-proxy"] == "Self-Dialer"
+    # an explicit upstream value still wins
+    assert by_name["[air] Own"]["dialer-proxy"] == "Upstream-Dialer"
+
+
 def test_add_subscription_defaults_target_group_and_filter(temp_clash_root, monkeypatch):
     engine = sm.SubscriptionEngine(root=temp_clash_root)
     # Pass empty exclude_filter and no target_group with inject_local=True
