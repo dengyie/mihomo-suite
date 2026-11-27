@@ -1823,21 +1823,28 @@ def parse_hysteria2_uri(uri: str) -> Optional[Dict[str, Any]]:
     return node
 
 
+# 协议 dispatch 表: scheme 前缀 -> 解析器 (单一来源, parse_proxy_uri 与
+# parse_raw_node_list 的"纯 URI 列表"判定共用; 新协议只需在这里加一行)
+PROTO_SCHEMES = {
+    ('ss://',): parse_ss_uri,
+    ('vmess://',): parse_vmess_uri,
+    ('vless://',): parse_vless_uri,
+    ('trojan://',): parse_trojan_uri,
+    ('hysteria2://', 'hy2://'): parse_hysteria2_uri,
+}
+URI_SCHEME_PREFIXES = tuple(
+    scheme for schemes in PROTO_SCHEMES for scheme in schemes
+)
+
+
 def parse_proxy_uri(line: str) -> Optional[Dict[str, Any]]:
-    """Dispatch raw URI string to corresponding protocol parser."""
+    """Dispatch raw URI string to corresponding protocol parser (table-driven)."""
     line = line.strip()
     if not line:
         return None
-    if line.startswith('ss://'):
-        return parse_ss_uri(line)
-    elif line.startswith('vmess://'):
-        return parse_vmess_uri(line)
-    elif line.startswith('vless://'):
-        return parse_vless_uri(line)
-    elif line.startswith('trojan://'):
-        return parse_trojan_uri(line)
-    elif line.startswith('hysteria2://') or line.startswith('hy2://'):
-        return parse_hysteria2_uri(line)
+    for schemes, parser in PROTO_SCHEMES.items():
+        if any(line.startswith(s) for s in schemes):
+            return parser(line)
     return None
 
 
@@ -1847,7 +1854,7 @@ def parse_raw_node_list(text: str) -> List[Dict[str, Any]]:
         return []
 
     stripped = text.strip()
-    is_plain_uris = any(stripped.startswith(prefix) for prefix in ('ss://', 'vmess://', 'vless://', 'trojan://', 'hy2://', 'hysteria2://'))
+    is_plain_uris = any(stripped.startswith(prefix) for prefix in URI_SCHEME_PREFIXES)
     is_plain_yaml = 'proxies:' in stripped or 'Proxy:' in stripped
 
     lines_to_process = []

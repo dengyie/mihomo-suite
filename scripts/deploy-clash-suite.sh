@@ -185,15 +185,23 @@ REMOTE
 ssh -o BatchMode=yes "$HOST" "rm -rf '$STAGE_REMOTE'" || warn "could not remove staging dir"
 
 log "done — installed ${#DIFF[@]} changed + ${#MISSING[@]} missing file(s)"
+
+# gateway 在 import 时加载 subscription-manager / clash_lock / google_ai_rules;
+# 这些文件变更后不重启就是新旧代码混跑。对齐 deploy-zashboard.sh 的自动重启语义。
+if printf '%s\n' ${TO_INSTALL[@]+"${TO_INSTALL[@]}"} | grep -qE '^(clash_lock|subscription-manager|google_ai_rules)\.py$'; then
+  log "gateway-relevant module changed — restarting zashboard-gateway"
+  if ssh -o BatchMode=yes "$HOST" supervisorctl restart zashboard-gateway; then
+    ssh -o BatchMode=yes "$HOST" "sleep 3; supervisorctl status zashboard-gateway | grep -q RUNNING" \
+      && log "gateway restarted and RUNNING" \
+      || warn "gateway did not come back RUNNING — check supervisorctl status"
+  else
+    warn "gateway restart failed — run: ssh $HOST supervisorctl restart zashboard-gateway"
+  fi
+fi
 cat <<EOF
 
 [clash] Next:
   keeper (apply-local-import/rules-reconciler/hutao-bridge-guard) picks up new
-  code on its next cycle. The gateway imports subscription-manager + clash_lock
-  at load time, so restart it for the lock change to take effect:
-
-    ssh $HOST supervisorctl restart zashboard-gateway
-    # (pxed peer removed 2026-11-26: pxed 报废销毁，无需再重启对端)
-
-  Roll back any file with:  mv <file>.pre-deploy-$TS <file>
+  code on its next cycle — those scripts are spawned fresh per loop, no restart
+  needed. Roll back any file with:  mv <file>.pre-deploy-$TS <file>
 EOF

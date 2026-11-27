@@ -21,6 +21,9 @@ LOG_MAX_MB=${LOG_MAX_MB:-50}   # mihomo.log 超过就瘦身
 LOG_KEEP_MB=${LOG_KEEP_MB:-10} # 瘦身后保留末尾
 BAK_RETAIN=${BAK_RETAIN:-10}   # 每族自动备份保留份数
 GUARD_LOG_MAX_MB=${GUARD_LOG_MAX_MB:-5}
+# 控制面 (9090) 连续挂 N 轮才重启: 单轮抖动 (reload 瞬断) 不值得动内核
+CTRL_FAIL_RESTART=${CTRL_FAIL_RESTART:-2}
+ctrl_fail=0
 
 # mihomo 自身出站不能走容器坏代理
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
@@ -107,7 +110,25 @@ while true; do
   if ! netstat -ltn 2>/dev/null | grep -q ':7897 '; then
     say "mihomo 不在, 拉起"
     run_logged start-clash bash "$START" || true
-  elif [ -x "$GUARD" ]; then
+  else
+    # 控制面自检: 7897 活而 9090 死时, guard/reconcile/面板的 API 全部静默失效
+    # (guard 失败只打一行 WARN, keeper 表面"正常")。连续 N 轮不通就重启内核。
+    ctrl_ok=1
+    curl -m5 -s -o /dev/null http://127.0.0.1:9090/version || ctrl_ok=0
+    if [ "$ctrl_ok" -eq 0 ]; then
+      ctrl_fail=$((ctrl_fail + 1))
+      say "控制面 9090 不通 ($ctrl_fail/$CTRL_FAIL_RESTART)"
+      if [ "$ctrl_fail" -ge "$CTRL_FAIL_RESTART" ]; then
+        say "控制面连续 $ctrl_fail 轮不通, 重启 mihomo"
+        run_logged start-clash bash "$START" || true
+        ctrl_fail=0
+      fi
+    else
+      ctrl_fail=0
+    fi
+  fi
+
+  if netstat -ltn 2>/dev/null | grep -q ':7897 ' && [ -x "$GUARD" ]; then
     # 单次自检: listener.proxy 悬空 / 桥不通 时换个活的美国节点并 reload
     run_logged guard "$GUARD" || true
   fi

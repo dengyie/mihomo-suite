@@ -25,6 +25,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+try:
+    from clash_lock import ClashConfigLock, atomic_write_text
+except ImportError:  # loaded by path (tests) without its dir on sys.path
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from clash_lock import ClashConfigLock, atomic_write_text
+
 CLASH_DIR = Path("/personal/clash")
 CFG = CLASH_DIR / "config.yaml"
 MERGED = CLASH_DIR / "config.mac-merged.yaml"
@@ -234,46 +240,49 @@ def rewrite_config_groups(
         print(f"  group {name}: {len(old)} -> {len(g['proxies'])}")
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-    bak = cfg_path.with_suffix(cfg_path.suffix + f".pre-health-{ts}")
-    bak.write_text(text, encoding="utf-8")
-    # 只保留最近 RETAIN 份同族备份, 否则每轮两份会无界增长(曾累积 1300+ 份 / 500MB)
-    RETAIN = 20
-    try:
-        fam = sorted(cfg_path.parent.glob(cfg_path.name + ".pre-health-*"))
-        for stale in fam[:-RETAIN]:
-            stale.unlink()
-    except OSError:
-        pass
-    class NoAliasDumper(yaml.SafeDumper):
-        def ignore_aliases(self, data):  # type: ignore[no-untyped-def]
-            return True
+    # 与其他 config writer 对齐: 拿 ClashConfigLock + 原子写 (review P2-2)。
+    # 裸 write_text 与 guard/reconcile 交错会丢更新, NFS 读者还可能见到半文件。
+    with ClashConfigLock():
+        bak = cfg_path.with_suffix(cfg_path.suffix + f".pre-health-{ts}")
+        atomic_write_text(bak, text)
+        # 只保留最近 RETAIN 份同族备份, 否则每轮两份会无界增长(曾累积 1300+ 份 / 500MB)
+        RETAIN = 20
+        try:
+            fam = sorted(cfg_path.parent.glob(cfg_path.name + ".pre-health-*"))
+            for stale in fam[:-RETAIN]:
+                stale.unlink()
+        except OSError:
+            pass
+        class NoAliasDumper(yaml.SafeDumper):
+            def ignore_aliases(self, data):  # type: ignore[no-untyped-def]
+                return True
 
-    header = ""
-    if text.lstrip().startswith("#"):
-        # keep first comment block lines
-        lines = text.splitlines(keepends=True)
-        buf = []
-        for ln in lines:
-            if ln.startswith("#") or ln.strip() == "":
-                buf.append(ln)
-                if len(buf) > 20:
+        header = ""
+        if text.lstrip().startswith("#"):
+            # keep first comment block lines
+            lines = text.splitlines(keepends=True)
+            buf = []
+            for ln in lines:
+                if ln.startswith("#") or ln.strip() == "":
+                    buf.append(ln)
+                    if len(buf) > 20:
+                        break
+                else:
                     break
-            else:
-                break
-        header = "".join(buf)
-        if header and not header.endswith("\n"):
-            header += "\n"
-        header += f"# health-filter {ts} healthy={len(healthy)} dead_stripped_from {','.join(REGISTER_GROUPS)}\n"
+            header = "".join(buf)
+            if header and not header.endswith("\n"):
+                header += "\n"
+            header += f"# health-filter {ts} healthy={len(healthy)} dead_stripped_from {','.join(REGISTER_GROUPS)}\n"
 
-    body = yaml.dump(
-        data,
-        Dumper=NoAliasDumper,
-        allow_unicode=True,
-        sort_keys=False,
-        width=120,
-        default_flow_style=False,
-    )
-    cfg_path.write_text(header + body, encoding="utf-8")
+        body = yaml.dump(
+            data,
+            Dumper=NoAliasDumper,
+            allow_unicode=True,
+            sort_keys=False,
+            width=120,
+            default_flow_style=False,
+        )
+        atomic_write_text(cfg_path, header + body)
     print(f"  wrote {cfg_path} (bak {bak.name})")
     return bak
 

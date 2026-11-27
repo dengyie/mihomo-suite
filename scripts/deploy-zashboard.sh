@@ -81,6 +81,10 @@ fi
 
 # ------------------------------------------------------------- 1. local gates
 log "running local gates"
+# gateway.py 语法坏一行 = 部署后 supervisor 反复重启/FATAL, 面板+代理 API 全停
+# (与 2026-09-01 PyYAML 事故同类: _startup_diagnostics 只能报不能防)。
+python3 -m py_compile "$REPO_ROOT/zashboard/gateway.py" \
+  || die "gateway.py has a syntax error"
 node "$REPO_ROOT/scripts/check-dist-assets.mjs" >/dev/null \
   || die "check-dist-assets failed — refusing to ship a truncated/corrupt asset"
 node --check "$REPO_ROOT/zashboard/src/user-rules-ui.js" \
