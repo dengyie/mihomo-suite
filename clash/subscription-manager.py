@@ -2372,12 +2372,19 @@ class SubscriptionEngine:
         inject_local: Optional[bool] = None,
         probe: bool = True,
         target_group: Optional[str] = None,
+        self_published: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Update subscription metadata and optionally re-fetch/parse.
 
         URL fetch and TCP probe run outside the subscription lock. A skip_merge
         (or explicit inject_local) refresh re-injects alive nodes into
         ``airports/local-nodes.yaml``. Fetch failure is ``success: False``.
+
+        ``self_published`` marks a record that subscribes to our own published
+        export (kept for panel visibility / health only). Its refresh only
+        updates the cache and node_count: it never injects or prunes, even with
+        an explicit ``inject_local=True`` — injecting would loop every exported
+        node back in under a second ``[<sub>] `` prefix.
         """
         fetch_url_value: Optional[str] = None
         with ClashConfigLock(self.lock_file):
@@ -2405,6 +2412,11 @@ class SubscriptionEngine:
                 sub['target_group'] = target_group.strip() if str(target_group).strip() else None
             if enabled is not None:
                 sub['enabled'] = enabled
+            if self_published is not None:
+                if self_published:
+                    sub['self_published'] = True
+                else:
+                    sub.pop('self_published', None)
 
             # A rename changes the injected name prefix; retract the old names
             # so they do not survive in local-nodes.yaml as orphans.
@@ -2452,7 +2464,7 @@ class SubscriptionEngine:
                             bool(inject_local)
                             if inject_local is not None
                             else bool(sub.get('skip_merge'))
-                        )
+                        ) and not sub.get('self_published')
                         if want_inject and filtered:
                             pending_inject = apply_node_name_prefix(
                                 filtered, sub.get('name', sub_id)
@@ -3492,6 +3504,10 @@ def main():
     parser.add_argument('--add', nargs=2, metavar=('NAME', 'URL'), help='Add a remote subscription')
     parser.add_argument('--update', metavar='ID', help='Update/refresh a subscription by ID')
     parser.add_argument('--delete', metavar='ID', help='Delete a subscription by ID')
+    parser.add_argument(
+        '--set-self-published', nargs=2, metavar=('ID', 'on|off'),
+        help='Mark a subscription that points at our own published export: refresh never injects/prunes',
+    )
     parser.add_argument('--import-nodes', nargs=2, metavar=('NAME', 'TEXT'), help='Import nodes from raw text')
     parser.add_argument('--target-group', metavar='GROUP', help='Target simple group in local-nodes.yaml (e.g. vps-import)')
     parser.add_argument('--skip-merge', action='store_true', help='Set skip_merge=True to isolate nodes from VPS merged config')
@@ -3535,6 +3551,18 @@ def main():
     if args.update:
         res = engine.update_subscription(sub_id=args.update, refresh=True)
         print(json.dumps(res, ensure_ascii=False, indent=2))
+        sys.exit(0 if res.get('success') else 1)
+
+    if args.set_self_published:
+        sub_id, flag = args.set_self_published
+        if flag not in ('on', 'off'):
+            parser.error('--set-self-published expects on|off')
+        res = engine.update_subscription(sub_id=sub_id, self_published=(flag == 'on'))
+        print(json.dumps(
+            {'success': res.get('success'), 'error': res.get('error'),
+             'self_published': bool((res.get('subscription') or {}).get('self_published'))},
+            ensure_ascii=False,
+        ))
         sys.exit(0 if res.get('success') else 1)
 
     if args.delete:

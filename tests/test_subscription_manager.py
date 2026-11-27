@@ -2996,7 +2996,7 @@ def _ss_yaml(names):
     lines = ["proxies:"]
     for i, n in enumerate(names):
         lines += [
-            f"  - name: {n}",
+            f"  - name: '{n}'",
             "    type: ss",
             f"    server: 192.0.2.{10 + i}",
             "    port: 8388",
@@ -3094,3 +3094,21 @@ def test_refresh_prune_unreadable_live_config_prunes_nothing(temp_clash_root, mo
     assert res["inject"]["upstream_pruned"]["pruned"] == []
     assert "error" in res["inject"]["upstream_pruned"]["skipped"]
     assert "[Pool] C" in {p["name"] for p in _local(temp_clash_root)["proxies"]}
+
+
+def test_self_published_refresh_never_injects_or_prunes(temp_clash_root, monkeypatch):
+    engine = SubscriptionEngine(root=temp_clash_root)
+    sub_id = _pool_with_nodes(engine, monkeypatch, ["A", "B"])
+    res = engine.update_subscription(sub_id=sub_id, self_published=True)
+    assert res["subscription"]["self_published"] is True
+    before = _local(temp_clash_root)
+    echo = _ss_yaml(["[Pool] A", "[自建] Box", "C"])
+    for inject in (None, True):
+        with patch.object(SubscriptionEngine, "fetch_url", return_value=echo):
+            res = engine.update_subscription(sub_id=sub_id, refresh=True, inject_local=inject)
+        assert res["success"] is True
+        assert "inject" not in res
+        assert res["subscription"]["node_count"] == 3
+        assert _local(temp_clash_root) == before
+    res = engine.update_subscription(sub_id=sub_id, self_published=False)
+    assert "self_published" not in res["subscription"]
