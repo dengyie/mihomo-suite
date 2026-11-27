@@ -35,6 +35,7 @@ MANAGED=(
   hutao-bridge-guard.py
   probe_clash_nodes.py
   rules-reconciler.py
+  sub-auto-refresh.py
   subscription-manager.py
   clash-keeper-loop.sh
 )

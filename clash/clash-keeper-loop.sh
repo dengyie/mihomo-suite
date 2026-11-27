@@ -13,6 +13,7 @@ DIR=/personal/clash
 BIN="$DIR/mihomo"
 LOG="$DIR/mihomo.log"
 GUARD="$DIR/hutao-bridge-guard.py"
+AUTO_REFRESH="$DIR/sub-auto-refresh.py"
 START="$DIR/start-clash.sh"
 
 INTERVAL=${INTERVAL:-120}      # 自检间隔秒
@@ -118,6 +119,13 @@ while true; do
 
   if [ -x "$DIR/apply-local-import.py" ]; then
     run_logged local-import "$DIR/apply-local-import.py" || true
+  fi
+
+  # 订阅自动刷新 (服务端兜底): 机场上游轮换入口端点后, 缓存节点会静默死亡。
+  # 每轮只刷新到期的订阅 (默认 6h), 失败退避 (默认 1h), self_published/raw 跳过。
+  # 刷新成功后按输入指纹重渲染客户端导出 (指纹不变则不落盘)。
+  if [ -x "$AUTO_REFRESH" ]; then
+    run_logged sub-auto-refresh "$AUTO_REFRESH" || true
   fi
 
   if [ -x "$DIR/rules-reconciler.py" ]; then
