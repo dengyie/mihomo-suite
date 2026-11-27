@@ -115,6 +115,9 @@ def reload_local(
         return response.status
 
 
+_NO_PEER_ADDRESSES = frozenset({'', '127.0.0.1', 'localhost', '::1', '0.0.0.0', '::'})
+
+
 def reload_remote_peer(
     config_path: Optional[Path] = None,
     timeout: float = 5.0,
@@ -126,13 +129,16 @@ def reload_remote_peer(
     """
     peer_node = 'tebi' if is_pxed_host() else 'pxed'
     peer_ip = get_remote_node_ip(peer_node)
-    if peer_ip in ('127.0.0.1', 'localhost'):
+    # Unspecified addresses are a retired-peer sentinel, not a peer: on Linux a
+    # connect to 0.0.0.0 reaches the local host, so the "remote" PUT would
+    # force-reload this node's own kernel a second time and drop its sessions.
+    if peer_ip in _NO_PEER_ADDRESSES:
         return {
             'peer_node': peer_node,
             'peer_ip': peer_ip,
             'status': None,
             'success': False,
-            'error': f"Peer IP resolved to loopback ({peer_ip}), skipping remote call",
+            'error': f"Peer IP resolved to loopback/unspecified ({peer_ip!r}), skipping remote call",
         }
 
     pw = get_panel_password()

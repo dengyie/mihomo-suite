@@ -111,17 +111,18 @@ def test_reload_remote_peer_success(mock_clash_env, monkeypatch):
     mock_resp.status = 204
     mock_resp.__enter__.return_value = mock_resp
 
-    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+    with patch.object(cluster_reload, "get_remote_node_ip", return_value="192.0.2.31"), \
+            patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
         res = cluster_reload.reload_remote_peer(config_path=config_file)
         assert res["success"] is True
         assert res["status"] == 204
         assert res["peer_node"] == "pxed"
-        assert res["peer_ip"] == "0.0.0.0"
+        assert res["peer_ip"] == "192.0.2.31"
         assert res["error"] is None
 
         req = mock_urlopen.call_args[0][0]
         assert req.get_method() == "PUT"
-        assert req.full_url == "http://0.0.0.0:2053/panel/api/configs?force=true"
+        assert req.full_url == "http://192.0.2.31:2053/panel/api/configs?force=true"
         assert req.get_header("Authorization") == "Bearer test-panel-password"
 
 
@@ -130,7 +131,8 @@ def test_reload_remote_peer_failure_does_not_raise(mock_clash_env, monkeypatch):
     clash_root, _, _ = mock_clash_env
     config_file = clash_root / "config.yaml"
 
-    with patch("urllib.request.urlopen", side_effect=TimeoutError("Connection timed out")):
+    with patch.object(cluster_reload, "get_remote_node_ip", return_value="192.0.2.31"), \
+            patch("urllib.request.urlopen", side_effect=TimeoutError("Connection timed out")):
         res = cluster_reload.reload_remote_peer(config_path=config_file, timeout=2.0)
         assert res["success"] is False
         assert res["status"] is None
@@ -146,9 +148,23 @@ def test_reload_remote_peer_loopback_guard(mock_clash_env, monkeypatch):
         assert "loopback" in res["error"]
 
 
+@pytest.mark.parametrize("sentinel", ["0.0.0.0", "::", ""])
+def test_reload_remote_peer_retired_peer_never_calls_out(mock_clash_env, monkeypatch, sentinel):
+    """The retired pxed resolves to 0.0.0.0, which Linux routes to the local
+    host: the PUT would force-reload our own kernel a second time."""
+    monkeypatch.setenv("NODE_NAME", "tebi")
+    with patch.object(cluster_reload, "get_remote_node_ip", return_value=sentinel), \
+            patch("urllib.request.urlopen") as mock_urlopen:
+        res = cluster_reload.reload_remote_peer()
+        assert res["success"] is False
+        assert "skipping remote call" in res["error"]
+        mock_urlopen.assert_not_called()
+
+
 def test_reload_remote_peer_missing_password_guard(mock_clash_env, monkeypatch):
     monkeypatch.setenv("NODE_NAME", "tebi")
-    with patch.object(cluster_reload, "get_panel_password", return_value=""):
+    with patch.object(cluster_reload, "get_remote_node_ip", return_value="192.0.2.31"), \
+            patch.object(cluster_reload, "get_panel_password", return_value=""):
         res = cluster_reload.reload_remote_peer()
         assert res["success"] is False
         assert "Missing panel password" in res["error"]

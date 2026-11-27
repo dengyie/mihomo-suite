@@ -311,7 +311,7 @@ def test_airport_refresh_keeps_host_owned_dialer_proxy(tmp_path):
 
 
 def test_airport_refresh_skips_disabled_and_dialer_only_diffs(tmp_path):
-    """A disabled pool node is never re-imported, and a diff that is only the
+    """A disabled pool node is pruned, not refreshed, and a diff that is only the
     host-owned dialer is not a refresh (keeps the keeper reporting unchanged)."""
     dead = "[share] 🇩🇪DE-Example"
     chained = "[tomorin] CH Example Chained"
@@ -326,7 +326,7 @@ def test_airport_refresh_skips_disabled_and_dialer_only_diffs(tmp_path):
 
     data, *_ , refreshed = ali.build_data(target, imported, {dead}, pool_proxies=imported)
     by_name = {p["name"]: p for p in data["proxies"]}
-    assert dead not in by_name or by_name[dead]["server"] == "192.0.2.50"
+    assert dead not in by_name  # disabled nodes are pruned, never re-imported
     assert by_name[chained]["dialer-proxy"] == "mesh-relay-pool"
     assert refreshed == 0
 
