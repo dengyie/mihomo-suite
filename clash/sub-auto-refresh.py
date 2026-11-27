@@ -23,7 +23,7 @@ TCP 可达但 anytls 会话全 503; 之前刷新只靠人工跑 --update, 没有
   sub-auto-refresh.py --force    # 忽略到期/退避, 立即刷新所有符合条件的
   sub-auto-refresh.py --status   # 只打印到期状态, 不刷新
 
-退出码: 0 无错误 (含"没到期的常规轮")  1 有订阅刷新失败
+退出码: 0 无错误 (含"没到期的常规轮")  1 有订阅刷新失败或客户端导出失败
 """
 from __future__ import annotations
 
@@ -68,9 +68,13 @@ ONLY_IDS = {
 
 def _parse_iso(value: Any) -> Optional[datetime]:
     try:
-        return datetime.fromisoformat(str(value))
+        dt = datetime.fromisoformat(str(value))
     except (TypeError, ValueError):
         return None
+    if dt.tzinfo is None:
+        # 手改/迁移产生的 naive 时间戳按 UTC 对齐; 否则减法直接 TypeError 崩掉整轮
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def load_state() -> Dict[str, Dict[str, Any]]:
@@ -83,9 +87,15 @@ def load_state() -> Dict[str, Dict[str, Any]]:
 
 def save_state(state: Dict[str, Dict[str, Any]]) -> None:
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = STATE_FILE.with_suffix(STATE_FILE.suffix + '.tmp')
-    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
-    tmp.replace(STATE_FILE)
+    # tmp 路径带 pid: 固定 .tmp 会被并发写者 (keeper + 手动 --force) 互相截断,
+    # publish 出对方/混合字节, JSON 损坏会让 load_state 归零 → 全量刷新风暴。
+    tmp = STATE_FILE.with_name(STATE_FILE.name + f'.tmp.{os.getpid()}')
+    try:
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+        tmp.replace(STATE_FILE)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
 
 
 def refreshable(sub: Dict[str, Any]) -> bool:
@@ -99,14 +109,22 @@ def refreshable(sub: Dict[str, Any]) -> bool:
     return bool(sub.get('url'))
 
 
-def due_hours(sub: Dict[str, Any], entry: Dict[str, Any]) -> float:
-    """该订阅距下次刷新的小时数 (负数 = 已到期)。失败条目按退避间隔算。"""
-    if entry.get('last_success'):
+def due_hours(entry: Dict[str, Any]) -> float:
+    """该订阅距下次刷新的小时数 (负数 = 已到期)。
+
+    判定看 last_error 而非 last_success: 上次尝试失败 (last_error 非空) 按
+    FAILURE_RETRY_HOURS 从 last_attempt 起算 —— 若锚在残留的旧 last_success 上,
+    once-successful 订阅开始失败后 gap 恒为负, 每 120s 锤一次上游 (review P1)。
+    成功时 last_error 被清空, 自然回到 6h 正常间隔。
+    """
+    if entry.get('last_error'):
+        anchor = _parse_iso(entry.get('last_attempt'))
+        interval = FAILURE_RETRY_HOURS
+    elif entry.get('last_success'):
         anchor = _parse_iso(entry.get('last_success'))
         interval = INTERVAL_HOURS
     else:
-        anchor = _parse_iso(entry.get('last_attempt'))
-        interval = FAILURE_RETRY_HOURS
+        return -1.0
     if anchor is None:
         return -1.0
     now = datetime.now(timezone.utc)
@@ -117,7 +135,6 @@ def run_once(engine: Optional[SubscriptionEngine] = None, force: bool = False) -
     engine = engine or SubscriptionEngine()
     subs: List[Dict[str, Any]] = engine.list_subscriptions()
     state = load_state()
-    now_iso = datetime.now(timezone.utc).isoformat()
     results: List[Dict[str, Any]] = []
     any_success = False
     any_failure = False
@@ -129,29 +146,45 @@ def run_once(engine: Optional[SubscriptionEngine] = None, force: bool = False) -
         if not refreshable(sub):
             continue
         entry = state.get(sub_id) or {}
-        gap = due_hours(sub, entry)
+        gap = due_hours(entry)
         if not force and gap >= 0:
             results.append({'id': sub_id, 'skipped': 'not-due', 'due_in_hours': round(gap, 2)})
             continue
-        res = engine.update_subscription(sub_id, refresh=True)
-        ok = bool(res.get('success'))
+        now_iso = datetime.now(timezone.utc).isoformat()
+        try:
+            res = engine.update_subscription(sub_id, refresh=True)
+            ok = bool(res.get('success'))
+            err = res.get('error')
+            nodes = (res.get('subscription') or {}).get('node_count')
+            injected = (res.get('inject') or {}).get('injected')
+        except Exception as e:  # P1: 单订阅异常不拖垮整批, 已刷新订阅的 state 也要保住
+            ok, err, nodes, injected = False, f'{type(e).__name__}: {e}', None, None
         if ok:
             entry.update({'last_attempt': now_iso, 'last_success': now_iso, 'last_error': None})
         else:
-            # 不写 last_success: 保持走 1h 失败退避而非 6h 正常间隔
-            entry.update({'last_attempt': now_iso, 'last_error': res.get('error')})
+            # 不写 last_success: 失败退避由 due_hours 按 last_error 判定
+            entry.update({'last_attempt': now_iso, 'last_error': err})
         state[sub_id] = entry
+        save_state(state)  # 每个订阅即时落盘: 后续订阅崩溃/锁超时不丢前面进度
         any_success = any_success or ok
         any_failure = any_failure or not ok
-        results.append({'id': sub_id, 'ok': ok, **({
-            'error': res.get('error'),
-        } if not ok else {
-            'nodes': (res.get('subscription') or {}).get('node_count'),
-            'injected': (res.get('inject') or {}).get('injected'),
-        })})
+        row: Dict[str, Any] = {'id': sub_id, 'ok': ok}
+        if not ok:
+            row['error'] = err
+        else:
+            if nodes is not None:
+                row['nodes'] = nodes
+            if injected is not None:
+                row['injected'] = injected
+        results.append(row)
 
-    if results:
-        save_state(state)
+    if results and not ONLY_IDS:
+        # 清掉 meta 里已不存在的订阅残留条目 (删订阅后 state 不无限增长)
+        live_ids = {str(s.get('id') or '') for s in subs}
+        pruned_state = {k: v for k, v in state.items() if k in live_ids}
+        if len(pruned_state) != len(state):
+            state = pruned_state
+            save_state(state)
 
     published = False
     if any_success:
@@ -181,7 +214,7 @@ def main() -> int:
                 print(f"{sub.get('id')}: skipped (not refreshable)")
                 continue
             entry = state.get(str(sub.get('id'))) or {}
-            gap = due_hours(sub, entry)
+            gap = due_hours(entry)
             mark = 'DUE' if gap < 0 else f"due in {gap:.1f}h"
             err = f" last_error={entry.get('last_error')}" if entry.get('last_error') else ''
             print(f"{sub.get('id')}: {mark}{err}")

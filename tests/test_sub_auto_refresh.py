@@ -59,26 +59,47 @@ def test_refreshable_skips_missing_url():
 
 # ------------------------------------------------------------- due_hours 到期
 def test_due_when_never_attempted():
-    assert sar.due_hours(_sub(), {}) == -1.0  # 负数 = 已到期
+    assert sar.due_hours({}) == -1.0  # 负数 = 已到期
 
 
 def test_due_when_interval_elapsed():
     # 距上次成功 10h > 默认 6h -> 到期
-    assert sar.due_hours(_sub(), _entry(hours_ago=10)) < 0
+    assert sar.due_hours(_entry(hours_ago=10)) < 0
 
 
 def test_not_due_within_interval():
     # 距上次成功 1h < 6h -> 未到期
-    assert sar.due_hours(_sub(), _entry(hours_ago=1)) > 0
+    assert sar.due_hours(_entry(hours_ago=1)) > 0
 
 
 def test_failure_retry_uses_short_backoff():
     # 上次失败 2h 后: 成功间隔(6h)会判未到期, 失败退避(1h)必须已到期
-    assert sar.due_hours(_sub(), _entry(hours_ago=2, success=False)) < 0
+    assert sar.due_hours(_entry(hours_ago=2, success=False)) < 0
+
+
+def test_success_then_failure_loses_old_success_anchor():
+    # P1 回归: once-successful 订阅开始失败后, 退避锚在 last_attempt 上,
+    # 不被残留的旧 last_success 钉死成"永远到期" (否则每 120s 锤一次上游)。
+    t_attempt = datetime.now(timezone.utc) - timedelta(hours=0.2)
+    entry = {"last_success": (datetime.now(timezone.utc) - timedelta(hours=7)).isoformat(),
+             "last_attempt": t_attempt.isoformat(), "last_error": "Fetch failed: boom"}
+    # 失败仅 0.2h 前 < 1h 退避 -> 未到期 (旧逻辑会因 7h 前的 last_success 判到期)
+    assert sar.due_hours(entry) > 0
+
+
+def test_failure_backoff_expires_after_retry_window():
+    t_attempt = datetime.now(timezone.utc) - timedelta(hours=2)
+    entry = {"last_attempt": t_attempt.isoformat(), "last_error": "boom"}
+    assert sar.due_hours(entry) < 0
+
+
+def test_naive_timestamp_does_not_crash():
+    # P3 回归: 手改/迁移产生的 naive 时间戳不能让减法 TypeError 崩掉整轮
+    assert sar.due_hours({"last_success": "2026-11-28T08:00:00"}) is not None
 
 
 def test_unparseable_anchor_means_due():
-    assert sar.due_hours(_sub(), {"last_success": "garbage"}) == -1.0
+    assert sar.due_hours({"last_success": "garbage"}) == -1.0
 
 
 # ------------------------------------------------------------- run_once 主流程
@@ -184,6 +205,48 @@ def test_run_once_export_failure_marks_summary_failed():
     assert summary["ok"] is False
     export_row = [r for r in summary["results"] if r.get("id") == "_client_export"]
     assert export_row and "bad yaml" in export_row[0]["error"]
+
+
+def test_run_once_engine_exception_survives_and_persists_state():
+    # P1-2 回归: 单订阅异常不中断整批, 已刷新订阅的 state 仍落盘
+    subs = [_sub(sub_id="first"), _sub(sub_id="boom"), _sub(sub_id="third")]
+    results = [
+        {"success": True, "subscription": {"node_count": 5}, "inject": {"injected": 5}},
+        Exception("kaboom"),  # 中途抛异常
+        {"success": True, "subscription": {"node_count": 7}, "inject": {"injected": 7}},
+    ]
+    eng = _engine(subs, published=True)
+    eng.update_subscription.side_effect = results
+    summary = sar.run_once(engine=eng)
+    assert eng.update_subscription.call_count == 3  # 全部订阅都被尝试
+    assert summary["any_success"] is True and summary["ok"] is False
+    state = json.loads(sar.STATE_FILE.read_text())
+    assert state["first"]["last_success"] is not None
+    assert state["third"]["last_success"] is not None
+    assert state["boom"]["last_error"] == "Exception: kaboom"
+    assert "last_success" not in state["boom"]
+
+
+def test_run_once_prunes_deleted_sub_state():
+    # 删掉订阅后, 其残留 state 条目应被清理 (ONLY_IDS 为空时)
+    subs = [_sub(sub_id="alive")]
+    eng = _engine(subs, published=True)
+    sar.STATE_FILE.write_text(json.dumps({
+        "alive": {"last_success": "2026-11-28T00:00:00Z"},
+        "dead": {"last_success": "2026-11-01T00:00:00Z"},  # 已删订阅的残留
+    }))
+    summary = sar.run_once(engine=eng)
+    state = json.loads(sar.STATE_FILE.read_text())
+    assert "alive" in state
+    assert "dead" not in state
+
+
+def test_run_once_no_tmp_leftover():
+    eng = _engine([_sub()], published=True)
+    sar.run_once(engine=eng)
+    # save_state 的 pid-suffixed tmp 不得在 STATE_FILE 旁残留
+    leftovers = list(sar.STATE_FILE.parent.glob("auto-refresh-state.json.tmp.*"))
+    assert not leftovers, f"tmp leftover: {leftovers}"
 
 
 # ------------------------------------------------------------- CLI 退出码
