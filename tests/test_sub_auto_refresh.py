@@ -235,7 +235,7 @@ def test_run_once_prunes_deleted_sub_state():
         "alive": {"last_success": "2026-11-28T00:00:00Z"},
         "dead": {"last_success": "2026-11-01T00:00:00Z"},  # 已删订阅的残留
     }))
-    summary = sar.run_once(engine=eng)
+    sar.run_once(engine=eng)
     state = json.loads(sar.STATE_FILE.read_text())
     assert "alive" in state
     assert "dead" not in state
