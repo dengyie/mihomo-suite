@@ -263,6 +263,74 @@ def test_build_data_never_touches_live_only_legacy_nodes(tmp_path, pool):
     assert sum(1 for p in data["proxies"] if p["name"] == legacy) == 1
 
 
+def _airport_target(tmp_path, live_nodes):
+    target = tmp_path / "config.yaml"
+    target.write_text(yaml.safe_dump({
+        "proxies": live_nodes,
+        "proxy-groups": [{"name": "PROXY", "type": "select",
+                          "proxies": [n["name"] for n in live_nodes]}],
+        "rules": ["MATCH,PROXY"],
+    }, allow_unicode=True), encoding="utf-8")
+    return target
+
+
+def test_build_data_refreshes_rotated_airport_import_node(tmp_path):
+    """A subscription refresh rotates an airport node's server/port upstream;
+    the live config must follow or the kernel keeps dialling a dead endpoint."""
+    airport = "[share] 🇸🇬SG-Vmess(Example)"
+    imported = [_proxy(airport, "192.0.2.20", 30002, "vmess")]
+    target = _airport_target(tmp_path, [_proxy(airport, "192.0.2.10", 30001, "vmess")])
+
+    data, added, removed, refreshed = ali.build_data(target, imported, set(), pool_proxies=imported)
+    node = next(p for p in data["proxies"] if p["name"] == airport)
+    assert (node["server"], node["port"]) == ("192.0.2.20", 30002)
+    assert refreshed == 1 and added == 0 and removed == 0
+
+
+def test_airport_refresh_keeps_host_owned_dialer_proxy(tmp_path):
+    """Each host owns its airport chaining: a live dialer survives a pool copy
+    with a different (or no) dialer, and a live node without one gains none."""
+    chained = "[tomorin] CH Example Chained"
+    plain = "[tomorin] JP Example Plain"
+    imported = [
+        _dialer_node(chained, "192.0.2.31", 443, "[自建] 🇺🇸Example-Dialer"),
+        _dialer_node(plain, "192.0.2.41", 443, "[自建] 🇺🇸Example-Dialer"),
+    ]
+    target = _airport_target(tmp_path, [
+        _dialer_node(chained, "192.0.2.30", 443, "mesh-relay-pool"),
+        _proxy(plain, "192.0.2.40", 443),
+    ])
+
+    data, *_ , refreshed = ali.build_data(target, imported, set(), pool_proxies=imported)
+    by_name = {p["name"]: p for p in data["proxies"]}
+    assert by_name[chained]["server"] == "192.0.2.31"
+    assert by_name[chained]["dialer-proxy"] == "mesh-relay-pool"
+    assert by_name[plain]["server"] == "192.0.2.41"
+    assert "dialer-proxy" not in by_name[plain]
+    assert refreshed == 2
+
+
+def test_airport_refresh_skips_disabled_and_dialer_only_diffs(tmp_path):
+    """A disabled pool node is never re-imported, and a diff that is only the
+    host-owned dialer is not a refresh (keeps the keeper reporting unchanged)."""
+    dead = "[share] 🇩🇪DE-Example"
+    chained = "[tomorin] CH Example Chained"
+    imported = [
+        _proxy(dead, "192.0.2.51", 443),
+        _dialer_node(chained, "192.0.2.30", 443, "[自建] 🇺🇸Example-Dialer"),
+    ]
+    target = _airport_target(tmp_path, [
+        _proxy(dead, "192.0.2.50", 443),
+        _dialer_node(chained, "192.0.2.30", 443, "mesh-relay-pool"),
+    ])
+
+    data, *_ , refreshed = ali.build_data(target, imported, {dead}, pool_proxies=imported)
+    by_name = {p["name"]: p for p in data["proxies"]}
+    assert dead not in by_name or by_name[dead]["server"] == "192.0.2.50"
+    assert by_name[chained]["dialer-proxy"] == "mesh-relay-pool"
+    assert refreshed == 0
+
+
 def test_same_upstream_port_is_text_agnostic():
     assert ali.same_upstream(
         _proxy("X", "1.2.3.4", "443"), _proxy("Y", "1.2.3.4", 443)

@@ -278,15 +278,28 @@ def rename_self_built(data: dict, imported: list[dict]) -> tuple[int, int]:
     return nodes, refs
 
 
-def refresh_self_built_fields(data: dict, imported: list[dict]) -> int:
-    """Overwrite live self-built nodes with the pool's authoritative fields.
+# Keys on airport (vps-import) nodes whose live value is host-owned and never
+# overwritten by a pool refresh; ``[自建]`` nodes take every pool field.
+IMPORT_LIVE_OWNED_KEYS = ('dialer-proxy',)
+
+
+def refresh_self_built_fields(
+    data: dict,
+    imported: list[dict],
+    import_names: set[str] | frozenset[str] = frozenset(),
+) -> int:
+    """Overwrite live pool-owned nodes with the pool's authoritative fields.
 
     ``build_data`` historically only ever *added* proxies, so a port or
     credential change in the pool never reached the live configs: the keeper kept
     printing ``unchanged`` while clients (rendered from the pool) dialled the new
     endpoint and the servers dialled the old one. Every exactly-named ``[自建]``
-    node is replaced by its pool copy; live-only legacy nodes
-    (``LEGACY_SELF_BUILT``) have no pool entry and are left untouched.
+    node, and every ``vps-import`` member named in ``import_names`` (airport
+    nodes re-injected by a subscription refresh rotate server/port upstream), is
+    replaced by its pool copy (airport nodes keep their live
+    ``IMPORT_LIVE_OWNED_KEYS``); live-only legacy nodes (``LEGACY_SELF_BUILT``)
+    have no pool entry and are left untouched. Gateway-only relay dialers are
+    re-applied afterwards by ``apply_gateway_relays``.
 
     Returns the number of nodes whose fields were refreshed.
     """
@@ -294,7 +307,7 @@ def refresh_self_built_fields(data: dict, imported: list[dict]) -> int:
         p['name']: p
         for p in imported or []
         if isinstance(p, dict) and isinstance(p.get('name'), str)
-        and p['name'].startswith(SELF_TAG)
+        and (p['name'].startswith(SELF_TAG) or p['name'] in import_names)
     }
     if not pool:
         return 0
@@ -306,9 +319,17 @@ def refresh_self_built_fields(data: dict, imported: list[dict]) -> int:
         name = proxy.get('name')
         if not isinstance(name, str) or name not in pool:
             continue
-        fresh = pool[name]
+        fresh = copy.deepcopy(pool[name])
+        if not name.startswith(SELF_TAG):
+            # Airport nodes: each host owns its chaining (tebi routes some via
+            # mesh-relay-pool, the Mac via a self-built dialer), so the live
+            # value -- present or absent -- wins over the pool copy.
+            for key in IMPORT_LIVE_OWNED_KEYS:
+                fresh.pop(key, None)
+                if key in proxy:
+                    fresh[key] = proxy[key]
         if fresh != proxy:
-            proxies[index] = copy.deepcopy(fresh)
+            proxies[index] = fresh
             refreshed += 1
     return refreshed
 
@@ -482,7 +503,12 @@ def build_data(
     # After the rename pass every live self-built node carries its canonical
     # pool name, so the pool can now hand over the authoritative fields.
     refreshed = refresh_self_built_fields(
-        data, pool_proxies if pool_proxies is not None else imported
+        data, pool_proxies if pool_proxies is not None else imported,
+        import_names={
+            p['name'] for p in imported
+            if isinstance(p, dict) and isinstance(p.get('name'), str)
+            and not is_disabled(p['name'], disabled)
+        },
     )
     # after the refresh, which would otherwise wipe the gateway-only dialer
     relayed = apply_gateway_relays(
