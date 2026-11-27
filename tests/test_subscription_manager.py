@@ -1244,8 +1244,40 @@ def test_fetch_url_proxy_fallback_logs(temp_clash_root, monkeypatch, caplog):
                         proxy_url="127.0.0.1:7897",
                         timeout=15,
                         user_agent="ClashMeta/v1.18.0 mihomo/1.18.0",
+                        insecure_tls=False,
                     )
                     assert any("trying proxy 127.0.0.1:7897" in record.message for record in caplog.records)
+
+
+def test_tls_context_verifies_unless_insecure_opt_in():
+    import ssl
+    strict = sm._tls_context()
+    assert strict.verify_mode == ssl.CERT_REQUIRED and strict.check_hostname
+    loose = sm._tls_context(insecure_tls=True)
+    assert loose.verify_mode == ssl.CERT_NONE and not loose.check_hostname
+
+
+def test_insecure_tls_flag_is_opt_in_and_reaches_every_fetch(temp_clash_root):
+    """An airport with an expired panel cert opts in per record; others stay strict."""
+    engine = SubscriptionEngine(root=temp_clash_root)
+    body = "proxies:\n- name: JP\n  type: trojan\n  server: 192.0.2.10\n  port: 443\n  password: x\n"
+    with patch.object(engine, "fetch_url", return_value=body) as fetch:
+        strict = engine.add_subscription(name="strict", url="https://a.example/s", probe=False)
+        assert "insecure_tls" not in strict["subscription"]
+        assert fetch.call_args.kwargs["insecure_tls"] is False
+
+        loose = engine.add_subscription(
+            name="loose", url="https://b.example/s", probe=False, insecure_tls=True)
+        assert loose["subscription"]["insecure_tls"] is True
+        assert fetch.call_args.kwargs["insecure_tls"] is True
+
+        engine.update_subscription(sub_id=loose["subscription"]["id"], refresh=True, probe=False)
+        assert fetch.call_args.kwargs["insecure_tls"] is True
+
+        res = engine.update_subscription(sub_id=loose["subscription"]["id"], insecure_tls=False)
+        assert "insecure_tls" not in res["subscription"]
+        engine.update_subscription(sub_id=loose["subscription"]["id"], refresh=True, probe=False)
+        assert fetch.call_args.kwargs["insecure_tls"] is False
 
 
 def test_sub_fetch_proxies_parses_ordered_list(monkeypatch):
@@ -1267,7 +1299,7 @@ def test_fetch_url_tries_proxies_in_order_until_one_succeeds(temp_clash_root, mo
     engine = SubscriptionEngine(root=temp_clash_root)
     calls = []
 
-    def fake_proxy(url, proxy_url, timeout, user_agent):
+    def fake_proxy(url, proxy_url, timeout, user_agent, insecure_tls=False):
         calls.append(proxy_url)
         if proxy_url.endswith(":1"):
             raise ConnectionRefusedError("refused")
@@ -2109,7 +2141,7 @@ proxies:
     sub_id = added["subscription"]["id"]
     lock_held_during_fetch = []
 
-    def fake_fetch(url):
+    def fake_fetch(url, insecure_tls=False):
         with open(engine.lock_file, "a") as fh:
             try:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)

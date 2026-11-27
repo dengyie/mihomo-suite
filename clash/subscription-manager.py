@@ -1111,7 +1111,20 @@ def _read_capped(resp, limit: int) -> bytes:
     return bytes(buf)
 
 
-def _http_get_pinned(url: str, timeout: int, user_agent: str) -> Tuple[int, dict, bytes, str]:
+def _tls_context(insecure_tls: bool = False) -> ssl.SSLContext:
+    """Default verifying context; ``insecure_tls`` (per-subscription opt-in for an
+    airport whose panel certificate expired) disables hostname + chain checks.
+    SSRF pinning and the no-redirect / body-cap rules still apply."""
+    ctx = ssl.create_default_context()
+    if insecure_tls:
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
+def _http_get_pinned(
+    url: str, timeout: int, user_agent: str, insecure_tls: bool = False,
+) -> Tuple[int, dict, bytes, str]:
     """GET url, connecting to a pinned IP. Does not follow redirects."""
     parsed = urllib.parse.urlsplit(url)
     scheme = (parsed.scheme or '').lower()
@@ -1133,7 +1146,7 @@ def _http_get_pinned(url: str, timeout: int, user_agent: str) -> Tuple[int, dict
     }
 
     if scheme == 'https':
-        ctx = ssl.create_default_context()
+        ctx = _tls_context(insecure_tls)
         conn = http.client.HTTPSConnection(pinned_ip, port, timeout=timeout, context=ctx)
 
         def _connect_with_sni():
@@ -1162,6 +1175,7 @@ def _http_get_via_proxy(
     proxy_url: str,
     timeout: int,
     user_agent: str,
+    insecure_tls: bool = False,
 ) -> Tuple[int, dict, bytes]:
     """GET url via an HTTP proxy (e.g. http://127.0.0.1:7897). Does not follow redirects."""
     proxy_clean = (proxy_url or '').strip()
@@ -1189,7 +1203,7 @@ def _http_get_via_proxy(
     }
 
     if scheme == 'https':
-        ctx = ssl.create_default_context()
+        ctx = _tls_context(insecure_tls)
         conn = http.client.HTTPSConnection(proxy_host, proxy_port, timeout=timeout, context=ctx)
         conn.set_tunnel(hostname, port, headers={'User-Agent': user_agent})
     else:
@@ -2176,9 +2190,11 @@ class SubscriptionEngine:
         content = json.dumps(data, ensure_ascii=False, indent=2)
         safe_atomic_write(self.meta_file, content)
 
-    def fetch_url(self, url: str, timeout: int = 15) -> str:
+    def fetch_url(self, url: str, timeout: int = 15, insecure_tls: bool = False) -> str:
         """Fetch subscription content with SSRF protection, no redirects, pinned IP, body cap,
-        and fallback to local proxy (e.g. 127.0.0.1:7897) when direct connection fails."""
+        and fallback to local proxy (e.g. 127.0.0.1:7897) when direct connection fails.
+
+        ``insecure_tls`` skips certificate verification (record flag, opt-in only)."""
         safe, err = is_safe_public_url(url)
         if not safe:
             raise ValueError(f"SSRF check failed: {err}")
@@ -2195,6 +2211,7 @@ class SubscriptionEngine:
                 url,
                 timeout=direct_timeout,
                 user_agent=user_agent,
+                insecure_tls=insecure_tls,
             )
             if 300 <= status < 400:
                 raise ValueError(
@@ -2226,6 +2243,7 @@ class SubscriptionEngine:
                     proxy_url=proxy_url,
                     timeout=timeout,
                     user_agent=user_agent,
+                    insecure_tls=insecure_tls,
                 )
             except Exception as proxy_err:
                 proxy_errors.append(f"{proxy_url}: {proxy_err}")
@@ -2260,6 +2278,7 @@ class SubscriptionEngine:
         inject_local: bool = False,
         probe: bool = True,
         target_group: Optional[str] = None,
+        insecure_tls: bool = False,
     ) -> Dict[str, Any]:
         """Add a new subscription source to metadata and process nodes.
 
@@ -2275,7 +2294,7 @@ class SubscriptionEngine:
             content = raw_content or ''
         elif url:
             try:
-                content = self.fetch_url(url)
+                content = self.fetch_url(url, insecure_tls=insecure_tls)
             except Exception as e:
                 fetch_error = f"Fetch failed: {e}"
 
@@ -2317,6 +2336,8 @@ class SubscriptionEngine:
                 'skip_merge': bool(skip_merge),
                 'target_group': target_group,
             }
+            if insecure_tls:
+                sub_record['insecure_tls'] = True
 
             if sub_type == 'raw' or raw_content:
                 sub_record['raw_content'] = raw_content or ''
@@ -2378,6 +2399,7 @@ class SubscriptionEngine:
         probe: bool = True,
         target_group: Optional[str] = None,
         self_published: Optional[bool] = None,
+        insecure_tls: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Update subscription metadata and optionally re-fetch/parse.
 
@@ -2422,6 +2444,11 @@ class SubscriptionEngine:
                     sub['self_published'] = True
                 else:
                     sub.pop('self_published', None)
+            if insecure_tls is not None:
+                if insecure_tls:
+                    sub['insecure_tls'] = True
+                else:
+                    sub.pop('insecure_tls', None)
 
             # A rename changes the injected name prefix; retract the old names
             # so they do not survive in local-nodes.yaml as orphans.
@@ -2444,7 +2471,8 @@ class SubscriptionEngine:
                 content = sub.get('raw_content', '') or ''
             elif fetch_url_value:
                 try:
-                    content = self.fetch_url(fetch_url_value)
+                    content = self.fetch_url(
+                        fetch_url_value, insecure_tls=bool(sub.get('insecure_tls')))
                 except Exception as e:
                     fetch_error = f"Fetch failed: {e}"
 
@@ -3088,7 +3116,8 @@ class SubscriptionEngine:
                         self.save_cached_content(sub_id, content)
                 elif sub.get('url'):
                     try:
-                        content = self.fetch_url(sub['url'])
+                        content = self.fetch_url(
+                            sub['url'], insecure_tls=bool(sub.get('insecure_tls')))
                         self.save_cached_content(sub_id, content)
                     except Exception as e:
                         sub['last_error'] = str(e)
@@ -3513,6 +3542,10 @@ def main():
         '--set-self-published', nargs=2, metavar=('ID', 'on|off'),
         help='Mark a subscription that points at our own published export: refresh never injects/prunes',
     )
+    parser.add_argument(
+        '--set-insecure-tls', nargs=2, metavar=('ID', 'on|off'),
+        help='Skip TLS certificate verification when fetching this subscription (expired panel cert)',
+    )
     parser.add_argument('--import-nodes', nargs=2, metavar=('NAME', 'TEXT'), help='Import nodes from raw text')
     parser.add_argument('--target-group', metavar='GROUP', help='Target simple group in local-nodes.yaml (e.g. vps-import)')
     parser.add_argument('--skip-merge', action='store_true', help='Set skip_merge=True to isolate nodes from VPS merged config')
@@ -3566,6 +3599,18 @@ def main():
         print(json.dumps(
             {'success': res.get('success'), 'error': res.get('error'),
              'self_published': bool((res.get('subscription') or {}).get('self_published'))},
+            ensure_ascii=False,
+        ))
+        sys.exit(0 if res.get('success') else 1)
+
+    if args.set_insecure_tls:
+        sub_id, flag = args.set_insecure_tls
+        if flag not in ('on', 'off'):
+            parser.error('--set-insecure-tls expects on|off')
+        res = engine.update_subscription(sub_id=sub_id, insecure_tls=(flag == 'on'))
+        print(json.dumps(
+            {'success': res.get('success'), 'error': res.get('error'),
+             'insecure_tls': bool((res.get('subscription') or {}).get('insecure_tls'))},
             ensure_ascii=False,
         ))
         sys.exit(0 if res.get('success') else 1)
