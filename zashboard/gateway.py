@@ -1629,6 +1629,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # 不暴露任何敏感字段。挂在最前面, 不走静态/面板路由。
         if path == '/healthz' and method in ('GET', 'HEAD'):
             return self._healthz(head_only=is_head)
+        if path == '/metrics' and method in ('GET', 'HEAD'):
+            return self._metrics(head_only=is_head)
 
         target_node = 'local'
         rel_path = path
@@ -1747,6 +1749,81 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         self.send_response(200)
         self.send_header('Content-Type', 'application/json')
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        if not head_only:
+            self.wfile.write(body)
+
+    def _metrics(self, head_only: bool = False):
+        """Prometheus 文本格式的无认证指标 (与 /healthz 同一组组件检查)。
+
+        面板/网关进程指标 + mihomo 组件布尔值 + keeper-status 里的子命令摘要。
+        无敏感字段: 与 /healthz 同级的外部可观测面, 只有 0/1 与计数。
+        """
+        started = time.time()
+        data_port = socket.socket()
+        data_port.settimeout(2)
+        try:
+            data_ok = data_port.connect_ex(('127.0.0.1', 7897)) == 0
+        finally:
+            data_port.close()
+
+        ctrl_ok = False
+        try:
+            conn = http.client.HTTPConnection(UPSTREAM_HOST, UPSTREAM_PORT, timeout=3)
+            conn.request('GET', '/version')
+            ctrl_ok = conn.getresponse().status in (200, 401)
+            conn.close()
+        except Exception:
+            pass
+
+        keeper_age = None
+        keeper_status = {}
+        keeper_path = CLASH_ROOT / 'keeper-status.json'
+        try:
+            keeper_age = round(time.time() - keeper_path.stat().st_mtime, 1)
+            keeper_status = json.loads(keeper_path.read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            pass
+        keeper_ok = keeper_age is not None and keeper_age <= 600
+
+        lines = [
+            '# HELP clash_gateway_up Gateway process reachability (self).',
+            '# TYPE clash_gateway_up gauge',
+            'clash_gateway_up 1',
+            '# HELP clash_gateway_uptime_seconds Gateway process uptime.',
+            '# TYPE clash_gateway_uptime_seconds gauge',
+            f'clash_gateway_uptime_seconds {time.time() - _GATEWAY_STARTED:.1f}',
+            '# HELP clash_mihomo_data_port_up mihomo 7897 data plane TCP reachable.',
+            '# TYPE clash_mihomo_data_port_up gauge',
+            f'clash_mihomo_data_port_up {1 if data_ok else 0}',
+            '# HELP clash_mihomo_control_api_up mihomo 9090 control API responsive.',
+            '# TYPE clash_mihomo_control_api_up gauge',
+            f'clash_mihomo_control_api_up {1 if ctrl_ok else 0}',
+            '# HELP clash_keeper_status_fresh keeper-status.json updated within 600s.',
+            '# TYPE clash_keeper_status_fresh gauge',
+            f'clash_keeper_status_fresh {1 if keeper_ok else 0}',
+            '# HELP clash_keeper_status_age_seconds Age of keeper-status.json.',
+            '# TYPE clash_keeper_status_age_seconds gauge',
+            f'clash_keeper_status_age_seconds {keeper_age if keeper_age is not None else -1}',
+            '# HELP clash_healthz_checked_seconds Duration of the component checks.',
+            '# TYPE clash_healthz_checked_seconds gauge',
+            f'clash_healthz_checked_seconds {time.time() - started:.3f}',
+        ]
+        if isinstance(keeper_status, dict) and 'epoch' in keeper_status:
+            lines += [
+                '# HELP clash_keeper_epoch_seconds Epoch of the last keeper cycle write.',
+                '# TYPE clash_keeper_epoch_seconds gauge',
+                f'clash_keeper_epoch_seconds {keeper_status.get("epoch", 0)}',
+                '# HELP clash_keeper_ctrl_failures Consecutive control-plane failures in keeper.',
+                '# TYPE clash_keeper_ctrl_failures gauge',
+                f'clash_keeper_ctrl_failures {keeper_status.get("ctrl_failures", 0)}',
+            ]
+
+        body = ('\n'.join(lines) + '\n').encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/plain; version=0.0.4; charset=utf-8')
         self.send_header('Cache-Control', 'no-store')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()

@@ -1,6 +1,7 @@
 """sub-auto-refresh: 服务端订阅自动刷新的到期/退避/准入/导出触发逻辑。"""
 import importlib.util
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -192,8 +193,21 @@ def test_run_once_skips_self_published_and_raw_entirely():
 
 def test_run_once_ids_filter():
     eng = _engine([_sub(sub_id="hutao"), _sub(sub_id="pokemon")])
-    with patch.object(sar, "ONLY_IDS", {"pokemon"}):
+    with patch.dict(os.environ, {"SUB_AUTO_REFRESH_IDS": "pokemon"}):
         sar.run_once(engine=eng)
+    ids = [c.args[0] for c in eng.update_subscription.call_args_list]
+    assert ids == ["pokemon"]
+
+
+def test_run_once_ids_filter_env_set_after_import():
+    # 回归 2026-11-28: ONLY_IDS 曾在 import 期快照, 库内复用 (import 后 setenv)
+    # 限订阅刷新静默失效变成全量刷新。现在必须运行期读 env。
+    eng = _engine([_sub(sub_id="hutao"), _sub(sub_id="pokemon")])
+    os.environ["SUB_AUTO_REFRESH_IDS"] = "pokemon"
+    try:
+        sar.run_once(engine=eng)
+    finally:
+        os.environ.pop("SUB_AUTO_REFRESH_IDS", None)
     ids = [c.args[0] for c in eng.update_subscription.call_args_list]
     assert ids == ["pokemon"]
 

@@ -644,6 +644,31 @@ class HealthzTests(unittest.TestCase):
         self.assertEqual(h.response_status, 200)
         self.assertIsNone(h.get_json())
 
+    def test_metrics_prometheus_text(self):
+        # 无认证 /metrics: Prometheus 文本格式, 组件布尔 + keeper 摘要
+        h = _FakeRequestHarness(self.gw, 'GET', '/metrics')
+        self.gw.Handler._dispatch(h.handler, 'GET')
+        self.assertEqual(h.response_status, 200)
+        self.assertEqual(h.response_headers.get('Content-Type'),
+                         'text/plain; version=0.0.4; charset=utf-8')
+        text = h.handler.wfile.getvalue().decode('utf-8')
+        # 7897 可能被本机其他测试/进程占用 (探针是真实 TCP connect), 不硬编码 0/1
+        self.assertRegex(text, r'clash_mihomo_data_port_up [01]')
+        for metric in ('clash_gateway_up 1',
+                       'clash_mihomo_control_api_up 0',
+                       'clash_keeper_status_fresh 0',
+                       'clash_keeper_status_age_seconds -1'):
+            self.assertIn(metric, text)
+        # keeper-status.json 带 epoch/ctrl_failures 时, 摘要指标出现
+        (self.clash_dir / 'keeper-status.json').write_text(
+            '{"ts": "2026-11-28T00:00:00Z", "epoch": 1795832809, "ctrl_failures": 2}')
+        h2 = _FakeRequestHarness(self.gw, 'GET', '/metrics')
+        self.gw.Handler._dispatch(h2.handler, 'GET')
+        text2 = h2.handler.wfile.getvalue().decode('utf-8')
+        self.assertIn('clash_keeper_status_fresh 1', text2)
+        self.assertIn('clash_keeper_epoch_seconds 1795832809', text2)
+        self.assertIn('clash_keeper_ctrl_failures 2', text2)
+
     def test_secret_cache_hit_and_invalidation(self):
         # 缓存按 mtime+size 失效; 直接驱动 _read_secret_file 以覆盖
         # stat/read 失败路径 (panel_password 的 exists() 前置会拦截删除场景)

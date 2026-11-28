@@ -62,9 +62,14 @@ def _hours(env: str, default: float) -> float:
 
 INTERVAL_HOURS = _hours('SUB_AUTO_REFRESH_INTERVAL_HOURS', DEFAULT_INTERVAL_HOURS)
 FAILURE_RETRY_HOURS = _hours('SUB_AUTO_REFRESH_FAILURE_RETRY_HOURS', DEFAULT_FAILURE_RETRY_HOURS)
-ONLY_IDS = {
-    s.strip() for s in (os.environ.get('SUB_AUTO_REFRESH_IDS') or '').split(',') if s.strip()
-}
+
+
+def _only_ids() -> set:
+    """每次调用读 env: 库内复用 (import 后 setenv) 也生效。import 期快照曾让
+    SUB_AUTO_REFRESH_IDS 静默失效 → 限订阅刷新变成全量刷新。"""
+    return {
+        s.strip() for s in (os.environ.get('SUB_AUTO_REFRESH_IDS') or '').split(',') if s.strip()
+    }
 
 
 def _parse_iso(value: Any) -> Optional[datetime]:
@@ -157,7 +162,8 @@ def run_once(engine: Optional[SubscriptionEngine] = None, force: bool = False) -
 
     for sub in subs:
         sub_id = str(sub.get('id') or '')
-        if ONLY_IDS and sub_id not in ONLY_IDS:
+        only = _only_ids()
+        if only and sub_id not in only:
             continue
         if not refreshable(sub):
             continue
@@ -194,7 +200,7 @@ def run_once(engine: Optional[SubscriptionEngine] = None, force: bool = False) -
                 row['injected'] = injected
         results.append(row)
 
-    if results and not ONLY_IDS:
+    if results and not _only_ids():
         # 清掉 meta 里已不存在的订阅残留条目 (删订阅后 state 不无限增长)
         live_ids = {str(s.get('id') or '') for s in subs}
         pruned_state = {k: v for k, v in state.items() if k in live_ids}

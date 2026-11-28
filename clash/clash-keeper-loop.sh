@@ -100,15 +100,27 @@ run_logged() {
   out=$("$@" 2>&1 9>&-); rc=$?
   [ -n "$out" ] && printf '%s\n' "$out" | sed 's/^/  /'
   [ "$rc" -eq 0 ] || say "WARN $label rc=$rc"
+  # 本轮关键子命令输出留档 keeper-status.json (healthz/metrics 可观测), 只留末行
+  case "$label" in
+    sub-auto-refresh|rules-reconcile) last_out[$label]="$(printf '%s' "$out" | tail -1)" ;;
+  esac
   return "$rc"
 }
+
+declare -A last_out
 
 say "=== clash-keeper 启动 interval=${INTERVAL}s ==="
 
 # 每轮结束写 keeper-status.json (mtime 是 /healthz 的 keeper_status_fresh 判据,
 # >10min 不更新即视为 keeper 躺平)。原子写: NFS 读者 (gateway) 不能见到半 JSON。
+# json_escape: 子命令末行输出可能含引号/反斜杠, 直接拼 JSON 会产出半文件。
+json_escape() { printf '%s' "$1" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))' 2>/dev/null || printf '"??"'; }
+
 write_status() {
   local tmp="$DIR/.keeper-status.json.$$"
+  local sar_out rec_out
+  sar_out=$(json_escape "${last_out[sub-auto-refresh]:-}")
+  rec_out=$(json_escape "${last_out[rules-reconcile]:-}")
   {
     printf '{\n'
     printf '  "ts": "%s",\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -117,7 +129,9 @@ write_status() {
     printf '  "interval_seconds": %s,\n' "$INTERVAL"
     printf '  "mihomo_7897": %s,\n' "$1"
     printf '  "mihomo_9090": %s,\n' "$2"
-    printf '  "ctrl_failures": %s\n' "$3"
+    printf '  "ctrl_failures": %s,\n' "$3"
+    printf '  "sub_auto_refresh_last": %s,\n' "$sar_out"
+    printf '  "rules_reconcile_last": %s\n' "$rec_out"
     printf '}\n'
   } > "$tmp" && mv -f "$tmp" "$DIR/keeper-status.json"
 }
