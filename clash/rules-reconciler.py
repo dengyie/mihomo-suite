@@ -24,11 +24,11 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import yaml
 
 try:
-    from clash_lock import ClashConfigLock
+    from clash_lock import ClashConfigLock, atomic_write_text
     from google_ai_rules import GOOGLE_AI_GROUP, google_ai_rules
 except ImportError:  # script loaded by path (tests) without its dir on sys.path
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from clash_lock import ClashConfigLock
+    from clash_lock import ClashConfigLock, atomic_write_text
     from google_ai_rules import GOOGLE_AI_GROUP, google_ai_rules
 
 # ROOT configuration supporting CLASH_ROOT environment variable
@@ -178,10 +178,9 @@ def load_user_rules() -> Dict[str, Any]:
 
 def save_user_rules_file(data: Dict[str, Any]) -> None:
     RULES_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp_file = RULES_FILE.with_suffix('.tmp')
     rendered = yaml.safe_dump(data, allow_unicode=True, sort_keys=False, width=120)
-    tmp_file.write_text(rendered)
-    os.replace(tmp_file, RULES_FILE)
+    # 与其他 config writer 对齐: 唯一 tmp 名 + os.replace, 避免并发写者互相覆盖
+    atomic_write_text(RULES_FILE, rendered)
 
 
 def load_injected_rules() -> List[str]:
@@ -198,7 +197,7 @@ def load_injected_rules() -> List[str]:
 
 def save_injected_rules(injected: List[str]) -> None:
     TRACKER_FILE.parent.mkdir(parents=True, exist_ok=True)
-    TRACKER_FILE.write_text(json.dumps(injected, ensure_ascii=False, indent=2))
+    atomic_write_text(TRACKER_FILE, json.dumps(injected, ensure_ascii=False, indent=2))
 
 
 def managed_rules_for(cfg: Dict[str, Any], user_rules: List[str]) -> List[str]:
@@ -347,16 +346,17 @@ def _reconcile_impl(dry_run: bool = False) -> Dict[str, Any]:
             details[target.name] = 'unchanged'
             continue
 
-        candidate = target.with_suffix('.candidate')
+        # mihomo -t 校验用临时文件: 唯一后缀, 避免与另一台 host 上并发运行的
+        # reconcile 互相踩踏 (校验完即删, 不落 config 目录的固定名残留)
+        candidate = target.with_suffix(f'.candidate-{os.getpid()}')
         candidate.write_text(rendered)
-        ok, err = test_candidate_config(candidate)
-        if not ok:
+        try:
+            ok, err = test_candidate_config(candidate)
+            if not ok:
+                return {'success': False, 'error': f"Mihomo syntax validation failed for {target.name}: {err}"}
+        finally:
             if candidate.exists():
                 candidate.unlink()
-            return {'success': False, 'error': f"Mihomo syntax validation failed for {target.name}: {err}"}
-
-        if candidate.exists():
-            candidate.unlink()
 
         candidate_renders[target] = rendered
         details[target.name] = 'changed'
@@ -373,9 +373,9 @@ def _reconcile_impl(dry_run: bool = False) -> Dict[str, Any]:
             shutil.copy2(target, backup)
             created_backups.append((target, backup))
 
-            tmp_file = target.with_suffix('.tmp')
-            tmp_file.write_text(rendered)
-            os.replace(tmp_file, target)
+            # 已在 ClashConfigLock 内; atomic_write_text 用唯一 tmp 名 + fsync,
+            # NFS 读者不会见到半文件 (原固定名 .tmp 会被两个 target 交错复用)
+            atomic_write_text(target, rendered)
 
         save_injected_rules(latest_injected)
 

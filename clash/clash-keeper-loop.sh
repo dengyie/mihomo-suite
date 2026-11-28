@@ -105,12 +105,31 @@ run_logged() {
 
 say "=== clash-keeper 启动 interval=${INTERVAL}s ==="
 
+# 每轮结束写 keeper-status.json (mtime 是 /healthz 的 keeper_status_fresh 判据,
+# >10min 不更新即视为 keeper 躺平)。原子写: NFS 读者 (gateway) 不能见到半 JSON。
+write_status() {
+  local tmp="$DIR/.keeper-status.json.$$"
+  {
+    printf '{\n'
+    printf '  "ts": "%s",\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    printf '  "epoch": %s,\n' "$(date +%s)"
+    printf '  "pid": %s,\n' "$$"
+    printf '  "interval_seconds": %s,\n' "$INTERVAL"
+    printf '  "mihomo_7897": %s,\n' "$1"
+    printf '  "mihomo_9090": %s,\n' "$2"
+    printf '  "ctrl_failures": %s\n' "$3"
+    printf '}\n'
+  } > "$tmp" && mv -f "$tmp" "$DIR/keeper-status.json"
+}
+
 while true; do
+  status_7897=false status_9090=false
   # 精准检测主 Mihomo (7897/9090) 是否存活，不能用 pgrep -x 误判
   if ! netstat -ltn 2>/dev/null | grep -q ':7897 '; then
     say "mihomo 不在, 拉起"
     run_logged start-clash bash "$START" || true
   else
+    status_7897=true
     # 控制面自检: 7897 活而 9090 死时, guard/reconcile/面板的 API 全部静默失效
     # (guard 失败只打一行 WARN, keeper 表面"正常")。连续 N 轮不通就重启内核。
     ctrl_ok=1
@@ -124,6 +143,7 @@ while true; do
         ctrl_fail=0
       fi
     else
+      status_9090=true
       ctrl_fail=0
     fi
   fi
@@ -163,6 +183,8 @@ while true; do
     shrink_in_place "$gw_log" 20 5
   done
   prune_backups
+
+  write_status "$status_7897" "$status_9090" "$ctrl_fail"
 
   # 同理关掉 fd 9: sleep 是这里最长命的子进程, 孤儿化后最能拖延接班
   sleep "$INTERVAL" 9>&-

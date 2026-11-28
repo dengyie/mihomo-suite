@@ -54,6 +54,7 @@ _reconciler_lock = threading.Lock()
 _sub_manager_mtime = 0
 _sub_manager_module = None
 _sub_manager_lock = threading.Lock()
+_GATEWAY_STARTED = time.time()  # /healthz 上报用
 
 
 class SubManagerLoadError(RuntimeError):
@@ -162,7 +163,9 @@ def get_remote_node_ip(target_node: str) -> str:
         # 不再指向 10.5.103.87 / 10.144.144.31 死地址造成 1.5s+ 超时挂起。
         return '0.0.0.0'
     if target_node == 'tebi':
-        return '10.5.103.26'
+        # 与 cluster_reload.get_remote_node_ip 同语义: mesh 地址优先 (不随
+        # Bohrium 调度漂移), 10.5.x 内网 IP 兜底 (review: 硬编码漂移隐患)。
+        return '10.144.144.32'
     return '127.0.0.1'
 
 
@@ -215,9 +218,9 @@ def panel_password():
     """Return the panel API password, or '' if no panel.password file is    \
     configured. No hardcoded default: this gateway must fail closed (deny    \
     /panel/api) rather than expose a well-known credential. The password is    \
-    never injected into static HTML."""
+    never injected into static HTML. Reads are mtime+size cached (NFS)."""
     if PANEL_PASSWORD_FILE.exists():
-        return PANEL_PASSWORD_FILE.read_text().strip() or ''
+        return _read_secret_file(PANEL_PASSWORD_FILE) or ''
     return ''
 
 
@@ -278,8 +281,47 @@ MIHOMO_DELAY_URLS = {
     'http://1.1.1.1/cdn-cgi/trace',
     'https://1.1.1.1/cdn-cgi/trace',
     'https://cloudflare.com/cdn-cgi/trace',
-    'http://www.gstatic.com/generate_204',
 }
+# gstatic 在境内不可达 → delay 测试把它重写到 cloudflare trace (单一来源,
+# 与 MIHOMO_DELAY_URLS 同步演进)
+DELAY_REWRITE_TARGET = 'https://cloudflare.com/cdn-cgi/trace'
+DELAY_REWRITE_FROM = {
+    'http://www.gstatic.com/generate_204',
+    'https://www.gstatic.com/generate_204',
+    'http://1.1.1.1/cdn-cgi/trace',
+    'https://1.1.1.1/cdn-cgi/trace',
+}
+
+
+def _read_secret_file(path: Path) -> str:
+    """mtime+size 缓存的 secret 读取。
+
+    panel_password() / .controller-secret 每请求 open+read 在 NFS hang 或抖动时
+    会放大成全部请求阻塞 / fail-closed 401 风暴。stat 比 open+read 便宜且足够
+    判断变更; stat/读失败时回落上次成功值 (secrets 是低频变更文件, 短暂回退
+    好于全站 401)。双写文件不一致不会发生: 两个路径各自独立缓存。
+    """
+    try:
+        st = path.stat()
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = None
+    cached = _SECRET_CACHE.get(path)
+    if key is not None:
+        if cached and cached[0] == key:
+            return cached[1]
+        try:
+            value = path.read_text().strip()
+            _SECRET_CACHE[path] = (key, value)
+            return value
+        except OSError:
+            pass  # fall through to stale value
+    if cached:
+        return cached[1]
+    return ''
+
+
+_SECRET_CACHE: Dict[Path, tuple] = {}
 
 
 def _read_request_body(handler, limit: int = MAX_BODY_BYTES) -> bytes:
@@ -1326,14 +1368,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         query_params = parse_qs(urlsplit(self.path).query)
         if suffix.endswith('/delay') or suffix.endswith('/healthcheck'):
             test_url = query_params.get('url', [''])[0]
-            if test_url in (
-                'http://www.gstatic.com/generate_204',
-                'https://www.gstatic.com/generate_204',
-                'http://1.1.1.1/cdn-cgi/trace',
-                'https://1.1.1.1/cdn-cgi/trace',
-            ):
-                query_params['url'] = ['https://cloudflare.com/cdn-cgi/trace']
-                test_url = 'https://cloudflare.com/cdn-cgi/trace'
+            if test_url in DELAY_REWRITE_FROM:
+                query_params['url'] = [DELAY_REWRITE_TARGET]
+                test_url = DELAY_REWRITE_TARGET
             if test_url and test_url not in MIHOMO_DELAY_URLS:
                 self.send_json(403, {'status': 'error', 'error': 'delay url is not allowlisted'})
                 return
@@ -1357,10 +1394,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         headers.pop('Accept-Encoding', None)
         headers['Accept-Encoding'] = 'identity'
         headers['Host'] = f'{UPSTREAM_HOST}:{UPSTREAM_PORT}'
-        controller_secret = ''
-        secret_file = CLASH_ROOT / '.controller-secret'
-        if secret_file.exists():
-            controller_secret = secret_file.read_text().strip()
+        controller_secret = _read_secret_file(CLASH_ROOT / '.controller-secret')
         headers['Authorization'] = 'Bearer ' + controller_secret
         try:
             body = _read_request_body(self)
@@ -1416,10 +1450,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         upstream = socket.create_connection((UPSTREAM_HOST, UPSTREAM_PORT), timeout=10)
         try:
             path = rel_path[len('/panel/api'):]
-            controller_secret = ''
-            secret_file = CLASH_ROOT / '.controller-secret'
-            if secret_file.exists():
-                controller_secret = secret_file.read_text().strip()
+            controller_secret = _read_secret_file(CLASH_ROOT / '.controller-secret')
             upstream_query = {'token': controller_secret}
             lines = [f'GET {path or "/"}?{urlencode(upstream_query)} HTTP/1.1',
                      f'Host: {UPSTREAM_HOST}:{UPSTREAM_PORT}',
@@ -1544,6 +1575,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header('Content-Length', '0')
             self.end_headers()
             return
+        # 与本地 _websocket 同一白名单 (review: 路径检查不一致): 远端转发也不能
+        # 绕过 STREAM_ENDPOINTS 约束。
+        if api_path(remote_path_with_query) not in STREAM_ENDPOINTS:
+            self.send_json(403, {'status': 'error',
+                                 'error': f'WebSocket path not allowed: {api_path(remote_path_with_query)}'})
+            return
         upstream = socket.create_connection((remote_ip, remote_port), timeout=10)
         try:
             lines = [f'GET {remote_path_with_query} HTTP/1.1',
@@ -1587,6 +1624,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
         raw_path = self.path
         path = raw_path.split('?', 1)[0]
         query = ('?' + raw_path.split('?', 1)[1]) if '?' in raw_path else ''
+
+        # 无认证健康端点: 外部监控 (Mac cron / launchd) 只判 200 与 JSON 摘要,
+        # 不暴露任何敏感字段。挂在最前面, 不走静态/面板路由。
+        if path == '/healthz' and method in ('GET', 'HEAD'):
+            return self._healthz(head_only=is_head)
 
         target_node = 'local'
         rel_path = path
@@ -1655,6 +1697,61 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_CONNECT(self):
         self.send_error(405)
+
+    def _healthz(self, head_only: bool = False):
+        """无认证健康摘要 (review: 可观测性缺口)。
+
+        status: ok = 全部组件可达; degraded = 有组件不可达 (仍是 200, 让监控
+        差异化告警而非把整个网关判死)。检查项: 本机 mihomo 数据面 (7897 TCP)、
+        控制面 (9090 /version, 3s 短超时)、keeper 状态文件新鲜度 (<=10min)。
+        """
+        started = time.time()
+        data_port = socket.socket()
+        data_port.settimeout(2)
+        try:
+            data_ok = data_port.connect_ex(('127.0.0.1', 7897)) == 0
+        finally:
+            data_port.close()
+
+        ctrl_ok = False
+        try:
+            conn = http.client.HTTPConnection(UPSTREAM_HOST, UPSTREAM_PORT, timeout=3)
+            conn.request('GET', '/version')
+            # 200 或 401 都算控制面存活: mihomo 开了 secret 时无凭据请求返回 401,
+            # 但能拿到 HTTP 响应本身就证明 API 进程活着 (healthz 不带凭据)
+            ctrl_ok = conn.getresponse().status in (200, 401)
+            conn.close()
+        except Exception:
+            pass
+
+        keeper_age = None
+        keeper_path = CLASH_ROOT / 'keeper-status.json'
+        try:
+            keeper_age = round(time.time() - keeper_path.stat().st_mtime, 1)
+        except OSError:
+            pass
+        keeper_ok = keeper_age is not None and keeper_age <= 600
+
+        components = {
+            'mihomo_data_port': data_ok,
+            'mihomo_control_api': ctrl_ok,
+            'keeper_status_fresh': keeper_ok,
+        }
+        body = json.dumps({
+            'status': 'ok' if all(components.values()) else 'degraded',
+            'components': components,
+            'keeper_status_age_seconds': keeper_age,
+            'uptime_seconds': round(time.time() - _GATEWAY_STARTED, 1),
+            'checked_in_seconds': round(time.time() - started, 3),
+        }).encode()
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        if not head_only:
+            self.wfile.write(body)
 
     def do_GET(self):
         if self.headers.get('Upgrade', '').lower() == 'websocket' and ('/api/' in self.path or self.path.endswith('/api')):

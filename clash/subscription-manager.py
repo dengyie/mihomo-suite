@@ -90,6 +90,9 @@ SELF_TAG = '[自建] '
 SELF_FLAG_RE = re.compile('^[\U0001F1E6-\U0001F1FF]{2}')
 
 
+# ---------------------------------------------------------------- 节点名/黑名单工具
+
+
 def strip_self_tag(name: str) -> str:
     """Remove the ``[自建] `` prefix so name-based policy keeps matching.
 
@@ -185,6 +188,9 @@ CLIENT_DIRECT_RULES = [
 CLIENT_STATIC_DIRECT_CIDRS = ['51.83.6.5/32', '45.202.199.205/32']
 SELF_DIRECT_DNS_TTL_SEC = 600
 _SELF_DIRECT_DNS_CACHE: Dict[str, Tuple[float, List[str]]] = {}
+
+
+# ---------------------------------------------------------------- 自建节点直连 IP 推导
 
 
 def _resolve_server_ips(host: str) -> List[str]:
@@ -462,6 +468,9 @@ def _is_us_meta_node(name: str) -> bool:
     return _is_us_claude_node(name)
 
 
+# ---------------------------------------------------------------- 分组归一/裁剪
+
+
 def normalize_simple_groups(raw: Any) -> Dict[str, List[str]]:
     """Keep only name lists. Clash url-test/select fields are ignored."""
     groups: Dict[str, List[str]] = {}
@@ -538,6 +547,9 @@ def drop_unresolved_dialer_proxies(proxies: List[Dict[str, Any]]) -> List[Dict[s
         kept = nxt
         if not dropped:
             return kept
+
+
+# ---------------------------------------------------------------- 客户端导出渲染/校验/发布 (last-good 保护)
 
 
 class ClientExportInvalid(ValueError):
@@ -952,6 +964,9 @@ UDP_NODE_TYPES = frozenset({'hysteria', 'hysteria2', 'hy2', 'tuic', 'wireguard'}
 PROBE_REASON_SSRF = 'ssrf-skip'
 
 
+# ---------------------------------------------------------------- 原子写 / DNS 禁用名单
+
+
 def client_allow_lan() -> bool:
     """Client export binds mixed-port on LAN only when CLIENT_ALLOW_LAN=1.
 
@@ -989,6 +1004,9 @@ def safe_atomic_write(target_path: Path, content: str, encoding: str = 'utf-8', 
 # Group name for auto-mounted subscription proxies
 SUB_GROUP_NAME = '🌐 订阅导入'
 GENERIC_GROUP_NAMES = {'PROXY', '🚀 节点选择', '🎯 全球直连', '节点选择', 'Proxy', 'proxy'}
+
+
+# ---------------------------------------------------------------- URL 安全 / SSRF 防护
 
 
 def _ip_is_blocked(ip_obj: ipaddress._BaseAddress) -> bool:
@@ -1103,6 +1121,9 @@ def _pin_resolved_ip(hostname: str, allow_private: bool) -> str:
         if allow_private or not _ip_is_blocked(ip_obj):
             return ip_str
     raise ValueError("Disallowed internal/private IP or hostname")
+
+
+# ---------------------------------------------------------------- 指纹钉住的 HTTP 抓取
 
 
 def _read_capped(resp, limit: int) -> bytes:
@@ -1235,6 +1256,9 @@ _YamlSafeLoader = getattr(yaml, 'CSafeLoader', yaml.SafeLoader)
 _YamlSafeDumper = getattr(yaml, 'CSafeDumper', yaml.SafeDumper)
 
 
+# ---------------------------------------------------------------- 快速 YAML 路径
+
+
 def fast_yaml_load(stream: Any) -> Any:
     """Load YAML stream using C bindings if available for ~7x speedup."""
     if hasattr(stream, 'read'):
@@ -1252,6 +1276,9 @@ def fast_yaml_dump(data: Any, **kwargs: Any) -> str:
     kwargs.setdefault('sort_keys', False)
     kwargs.setdefault('width', 120)
     return yaml.dump(data, Dumper=_YamlSafeDumper, **kwargs)
+
+
+# ---------------------------------------------------------------- 禁用节点名单
 
 
 def load_disabled_nodes(disabled_path: Optional[Path] = None) -> Set[str]:
@@ -1298,6 +1325,9 @@ def save_disabled_nodes(names: Set[str], disabled_path: Optional[Path] = None) -
 
     content = "\n".join(header_lines) + "\n" + "\n".join(sorted_names) + "\n"
     safe_atomic_write(path, content)
+
+
+# ---------------------------------------------------------------- 目标配置 reconcile (gateway 调用)
 
 
 def reconcile_target_config(
@@ -1433,6 +1463,9 @@ def _reconcile_target_config_impl(
     return True
 
 
+# ---------------------------------------------------------------- 路径与 base64
+
+
 def get_paths(root: Optional[Path] = None) -> Tuple[Path, Path, Path, Path, Path, Path]:
     base = root.resolve() if root else (Path(os.environ.get('CLASH_ROOT')).resolve() if os.environ.get('CLASH_ROOT') else ROOT)
     meta = base / 'subscriptions/meta.json'
@@ -1472,6 +1505,9 @@ def decode_base64_safely(data: Union[str, bytes]) -> str:
 # ---------------------------------------------------------
 # URI Parsers
 # ---------------------------------------------------------
+
+# ---------------------------------------------------------------- 协议 URI 解析 (表驱动, 见 PROTO_SCHEMES)
+
 
 def parse_ss_uri(uri: str) -> Optional[Dict[str, Any]]:
     """Parse Shadowsocks URI (ss://...).
@@ -1909,6 +1945,9 @@ def parse_subscription_content(content: str) -> List[Dict[str, Any]]:
     return parse_raw_node_list(content)
 
 
+# ---------------------------------------------------------------- 节点过滤/命名/探测
+
+
 def filter_nodes(nodes: List[Dict[str, Any]], exclude_pattern: Optional[str] = None) -> List[Dict[str, Any]]:
     """Filter out announcement, non-proxy, and matching nodes."""
     pattern_str = exclude_pattern if exclude_pattern is not None else DEFAULT_EXCLUDE_FILTER
@@ -2090,6 +2129,9 @@ def probe_nodes(
     return alive, dead
 
 
+# ---------------------------------------------------------------- 本地节点文档读写
+
+
 def load_local_nodes_document(path: Path) -> Dict[str, Any]:
     empty = {'proxies': [], 'groups': {}, 'had_groups': False}
     if not path.exists():
@@ -2162,6 +2204,9 @@ def save_local_nodes_file(
 # ---------------------------------------------------------
 # Metadata & Subscription Engine Management
 # ---------------------------------------------------------
+
+# ================================================================ 订阅引擎 (fetch/parse/probe/inject/publish)
+
 
 class SubscriptionEngine:
     """Manages subscriptions, metadata, aggregation, and atomic file operations."""
@@ -3440,7 +3485,7 @@ class SubscriptionEngine:
         yaml_text, digest = last
         _export_warn('mango-clash publish rejected; serving last-good: %s' % '; '.join(errors[:8]))
         return {
-            'ok': True,
+            'success': True,
             'published': False,
             'served_last_good': True,
             'yaml': yaml_text,
@@ -3498,7 +3543,7 @@ class SubscriptionEngine:
                 and meta.get('sha256') == last[1]
             ):
                 return {
-                    'ok': True,
+                    'success': True,
                     'published': False,
                     'served_last_good': False,
                     'yaml': last[0],
@@ -3524,7 +3569,7 @@ class SubscriptionEngine:
             }
             safe_atomic_write(self.client_export_meta_file, json.dumps(meta, ensure_ascii=False, indent=2) + '\n')
             return {
-                'ok': True,
+                'success': True,
                 'published': False,
                 'served_last_good': False,
                 'yaml': last[0],
@@ -3551,7 +3596,7 @@ class SubscriptionEngine:
         }
         safe_atomic_write(self.client_export_meta_file, json.dumps(meta, ensure_ascii=False, indent=2) + '\n')
         return {
-            'ok': True,
+            'success': True,
             'published': True,
             'served_last_good': False,
             'yaml': candidate,
@@ -3563,6 +3608,9 @@ class SubscriptionEngine:
 # ---------------------------------------------------------
 # CLI Interface
 # ---------------------------------------------------------
+
+# ---------------------------------------------------------------- CLI 入口
+
 
 def main():
     parser = argparse.ArgumentParser(description='Clash Subscription Manager')

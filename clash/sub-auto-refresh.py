@@ -28,6 +28,7 @@ TCP 可达但 anytls 会话全 503; 之前刷新只靠人工跑 --update, 没有
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import sys
@@ -77,16 +78,31 @@ def _parse_iso(value: Any) -> Optional[datetime]:
     return dt
 
 
+def _state_lock_fd():
+    """state 文件的独占 flock (阻塞式): keeper 每轮调起 + 手动 --force 可并发,
+    read-modify-write 整个 state 字典, 丢一次互相覆盖就回退一轮退避状态。
+    锁文件独立于 state 文件本身 (state 被 os.replace 换掉后 inode 变化,
+    锁必须落在稳定路径上)。"""
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    fd = open(str(STATE_FILE) + '.lock', 'a+')
+    fcntl.flock(fd.fileno(), fcntl.LOCK_EX)
+    return fd
+
+
 def load_state() -> Dict[str, Dict[str, Any]]:
+    fd = _state_lock_fd()
     try:
         data = json.loads(STATE_FILE.read_text(encoding='utf-8'))
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
+    finally:
+        fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+        fd.close()
 
 
 def save_state(state: Dict[str, Dict[str, Any]]) -> None:
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    fd = _state_lock_fd()
     # tmp 路径带 pid: 固定 .tmp 会被并发写者 (keeper + 手动 --force) 互相截断,
     # publish 出对方/混合字节, JSON 损坏会让 load_state 归零 → 全量刷新风暴。
     tmp = STATE_FILE.with_name(STATE_FILE.name + f'.tmp.{os.getpid()}')
@@ -94,8 +110,8 @@ def save_state(state: Dict[str, Dict[str, Any]]) -> None:
         tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
         tmp.replace(STATE_FILE)
     finally:
-        if tmp.exists():
-            tmp.unlink()
+        fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+        fd.close()
 
 
 def refreshable(sub: Dict[str, Any]) -> bool:

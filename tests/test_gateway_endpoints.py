@@ -99,6 +99,12 @@ class GatewayEndpointsTests(unittest.TestCase):
         (self.clash_dir / 'clash_lock.py').write_text(
             (REPO_ROOT / 'clash' / 'clash_lock.py').read_text()
         )
+        # sibling dependency of subscription-manager.py (Google AI rule source);
+        # missing it only passes when another test file already put repo clash/
+        # on sys.path — single-file runs must not depend on execution order.
+        (self.clash_dir / 'google_ai_rules.py').write_text(
+            (REPO_ROOT / 'clash' / 'google_ai_rules.py').read_text()
+        )
 
         # Create basic config.yaml in clash_dir
         sample_config = {
@@ -605,6 +611,57 @@ class GatewayEndpointsTests(unittest.TestCase):
         self.assertEqual(harness.response_status, 200)
         self.assertEqual(harness.response_headers.get('Content-Type'), 'image/webp')
         self.assertEqual(harness.handler.wfile.getvalue(), payload)
+
+
+class HealthzTests(unittest.TestCase):
+    """无认证 /healthz: 组件摘要 + secret mtime 缓存行为。"""
+
+    def setUp(self):
+        self.setUp = GatewayEndpointsTests.setUp(self)
+
+    def test_healthz_no_auth_ok_and_degraded(self):
+        # keeper-status.json 不存在 → degraded 但仍 200
+        h = _FakeRequestHarness(self.gw, 'GET', '/healthz')
+        self.gw.Handler._dispatch(h.handler, 'GET')
+        self.assertEqual(h.response_status, 200)
+        body = h.get_json()
+        self.assertIn(body['status'], ('ok', 'degraded'))
+        self.assertIn('components', body)
+        self.assertFalse(body['components']['keeper_status_fresh'])
+
+        # 写入新鲜的 keeper-status.json → keeper 组件翻绿
+        # (测试环境没有真实 mihomo 监听 7897/9090, 整体 status 保持 degraded)
+        (self.clash_dir / 'keeper-status.json').write_text('{"ts": 1}')
+        h2 = _FakeRequestHarness(self.gw, 'GET', '/healthz')
+        self.gw.Handler._dispatch(h2.handler, 'GET')
+        body2 = h2.get_json()
+        self.assertTrue(body2['components']['keeper_status_fresh'])
+        self.assertEqual(body2['status'], 'degraded')
+
+    def test_healthz_head_has_no_body(self):
+        h = _FakeRequestHarness(self.gw, 'HEAD', '/healthz')
+        self.gw.Handler._dispatch(h.handler, 'HEAD', is_head=True)
+        self.assertEqual(h.response_status, 200)
+        self.assertIsNone(h.get_json())
+
+    def test_secret_cache_hit_and_invalidation(self):
+        # 缓存按 mtime+size 失效; 直接驱动 _read_secret_file 以覆盖
+        # stat/read 失败路径 (panel_password 的 exists() 前置会拦截删除场景)
+        pw = self.gw.PANEL_PASSWORD_FILE
+        self.assertEqual(self.gw._read_secret_file(pw), 'secret-token-123')
+        # stat key 不变时走缓存
+        self.assertEqual(self.gw._read_secret_file(pw), 'secret-token-123')
+        # 文件变更 → 下一次读拿新值
+        pw.write_text('rotated-token-456')
+        os.utime(pw)  # 确保 mtime 变化
+        self.assertEqual(self.gw._read_secret_file(pw), 'rotated-token-456')
+
+    def test_secret_cache_serves_stale_on_read_error(self):
+        pw = self.gw.PANEL_PASSWORD_FILE
+        self.assertEqual(self.gw._read_secret_file(pw), 'secret-token-123')
+        # 临时删掉文件: stat 失败 → 回落缓存值, 而非 fail-closed 空密码
+        pw.unlink()
+        self.assertEqual(self.gw._read_secret_file(pw), 'secret-token-123')
 
 
 if __name__ == '__main__':

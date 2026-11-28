@@ -15,9 +15,10 @@
 #   --dry-run   stage + verify only (no install)
 #   (default)   verify each file, back up the old one, atomically replace it
 #
-# It only ever touches the managed files listed in MANAGED below. Production-only
-# helpers (start-clash.sh, native-recovery-monitor.sh, proxy-selector-guard.py,
-# tcp-bridge.py) are deliberately left alone, and nothing is ever pruned.
+# It only ever touches the managed files listed in MANAGED below. The 2026-11-28
+# batch (start-clash.sh, native-recovery-monitor.sh, proxy-selector-guard.py,
+# tcp-bridge.py) was pulled from tebi into the repo and is now also managed;
+# nothing is ever pruned.
 #
 # /personal/clash is the shared NFS mount, so one install reaches both hosts.
 #
@@ -33,10 +34,14 @@ MANAGED=(
   clash_lock.py
   cluster_reload.py
   hutao-bridge-guard.py
+  native-recovery-monitor.sh
   probe_clash_nodes.py
+  proxy-selector-guard.py
   rules-reconciler.py
+  start-clash.sh
   sub-auto-refresh.py
   subscription-manager.py
+  tcp-bridge.py
   clash-keeper-loop.sh
 )
 
